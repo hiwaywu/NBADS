@@ -111,7 +111,36 @@ if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $all.Count) {
         Say '  (jumped straight to Main 1)' 'DarkGray'
     }
 
-    Start-Process $target
+    # open it in Chrome/Firefox, not in whatever Windows calls the default
+    # (that is Edge here, and Edge kept being the browser that came up).
+    $exe = $null
+    $txt = Join-Path $PSScriptRoot 'hub\browser.txt'
+    $names = @{
+        'chrome'  = "$env:ProgramFiles\Google\Chrome\Application\chrome.exe"
+        'firefox' = "$env:ProgramFiles\Mozilla Firefox\firefox.exe"
+        'edge'    = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+        'brave'   = "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe"
+    }
+    if (Test-Path $txt) {
+        $want = (Get-Content $txt | Where-Object { $_ -and -not $_.StartsWith('#') } | Select-Object -First 1)
+        if ($want) {
+            $want = $want.Trim()
+            if ($names.ContainsKey($want.ToLower())) { $want = $names[$want.ToLower()] }
+            if (Test-Path $want) { $exe = $want }
+        }
+    }
+    if (-not $exe) {
+        foreach ($k in 'chrome', 'firefox', 'brave', 'edge') {
+            if (Test-Path $names[$k]) { $exe = $names[$k]; break }
+        }
+    }
+    if ($exe) {
+        Start-Process -FilePath $exe -ArgumentList $target
+        Say ("  Opened in " + (Split-Path $exe -Leaf)) 'DarkGray'
+    } else {
+        Start-Process $target
+        Say '  Opened in the default browser.' 'DarkGray'
+    }
     Say '  Press play in the browser.' 'DarkGray'
     Start-Sleep -Seconds 2
 }

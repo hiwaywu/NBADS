@@ -217,9 +217,12 @@ class Relay:
                     for seq, (u, d) in new.items():
                         self.uris[seq] = u
                         self.durs[seq] = d
-                # fetch everything missing, in parallel
+                # fetch everything missing, newest first: the player wants to
+                # start at the live edge, so the newest segment must land first
                 with self.lock:
                     missing = [s for s in new if s not in self.segs]
+                missing.sort(reverse=True)
+                newest = max(new) if new else None
                 if missing:
                     t0 = time.time()
                     total = 0
@@ -240,18 +243,23 @@ class Relay:
                                 self.durs.pop(old, None)
                                 self.uris.pop(old, None)
                         total += len(data)
+                        # ready as soon as the edge segment is in RAM (2 as a floor)
+                        if newest is not None and seq == newest and len(self.segs) >= 2:
+                            self.ready.set()
                     dt = max(0.001, time.time() - t0)
                     self.throughput = (total * 8) / dt
                     print(f"[relay] +{len(missing)} seg  "
                           f"{total/1e6:.2f} MB in {dt:.2f}s  "
                           f"=> {self.throughput/1e6:.1f} Mbps upstream")
-                    if len(self.segs) >= 3:
+                    if len(self.segs) >= 2:
                         self.ready.set()
                 if self.max_seconds and self.segs_total * self.target > self.max_seconds:
                     print("[relay] duration cap reached")
                     self.stop.set()
-                # pace: wake up roughly every half segment
-                wait = min(max(self.target / 2, 0.5), 3.0)
+                # pace: wake up often enough that the playlist edge advances one
+                # segment at a time -- a batched update (+2 segments at once)
+                # makes the player jump 12 s further behind live
+                wait = min(max(self.target / 3, 0.5), 2.0)
                 if m["endlist"]:
                     wait = 0.5
                 if missing:
@@ -342,14 +350,29 @@ def make_handler(relay):
         def _send(self, code, body, ctype="text/plain; charset=utf-8", extra=None):
             if isinstance(body, str):
                 body = body.encode()
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+            except (ConnectionResetError, BrokenPipeError):
+                self.close_connection = True
+
+        def do_OPTIONS(self):
+            self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
-            for k, v in (extra or {}).items():
-                self.send_header(k, v)
+            self.send_header("Access-Control-Allow-Headers", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS")
+            self.send_header("Content-Length", "0")
             self.end_headers()
-            self.wfile.write(body)
+
+        def do_HEAD(self):
+            self.do_GET()
 
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
@@ -391,6 +414,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
     ap.add_argument("--port", type=int, default=8823)
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="0.0.0.0 = let a phone on the LAN reach this relay")
     ap.add_argument("--window", type=int, default=12, help="segments kept buffered")
     ap.add_argument("--prefetch", type=int, default=4, help="parallel downloads")
     ap.add_argument("--max-seconds", type=int, default=None)
@@ -445,9 +470,9 @@ def main():
     th = threading.Thread(target=relay.pump, daemon=True)
     th.start()
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(relay))
+    srv = ThreadingHTTPServer((args.host, args.port), make_handler(relay))
     srv.daemon_threads = True
-    print(f"[relay] serving http://127.0.0.1:{args.port}/live.m3u8")
+    print(f"[relay] serving http://{args.host}:{args.port}/live.m3u8")
     if relay.ready.wait(timeout=45):
         print("[relay] buffered and ready")
     else:

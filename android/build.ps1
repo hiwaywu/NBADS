@@ -22,7 +22,7 @@ Write-Host '[2/6] linking resources + manifest' -ForegroundColor Cyan
     --manifest "$root\AndroidManifest.xml" -R "$out\res.zip" `
     --java "$out\gen" --auto-add-overlay `
     --min-sdk-version 24 --target-sdk-version 34 `
-    --version-code 1 --version-name 1.0
+    --version-code 3 --version-name 1.3
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
 Write-Host '[3/6] compiling java' -ForegroundColor Cyan

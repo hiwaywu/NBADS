@@ -34,6 +34,25 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 NBA_DIR = os.path.dirname(ROOT)
 RELAY = os.path.join(NBA_DIR, "relay.py")
 FEEDS = os.path.join(NBA_DIR, "feeds.txt")
+LOG_PATH = os.path.join(ROOT, "hub.err.log")
+
+# Where the relay listens. 127.0.0.1 keeps it desktop-only; when the hub is
+# bound to 0.0.0.0 (the phone case) the relay has to listen on the LAN too, or
+# the phone is handed http://127.0.0.1:89xx/ and talks to itself.
+RELAY_HOST = "127.0.0.1"
+HUB_VERSION = "1.2"
+
+
+def log_exc(where, exc):
+    """pythonw has no console: an unhandled handler error has to leave a trace."""
+    try:
+        import traceback
+        with open(LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {where}: {exc!r}\n")
+            traceback.print_exception(type(exc), exc, exc.__traceback__, file=fh)
+    except Exception:
+        pass
+
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -53,24 +72,117 @@ def fetch(url, timeout=20, headers=None):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def find_browser():
-    cands = [
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
-                     "Google", "Chrome", "Application", "chrome.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-                     "Microsoft", "Edge", "Application", "msedge.exe"),
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
-                     "Microsoft", "Edge", "Application", "msedge.exe"),
-    ]
-    for c in cands:
-        if os.path.isfile(c):
-            return c
+BROWSER_FILE = os.path.join(ROOT, "browser.txt")
+
+# Order matters: Chrome first, Firefox second. Edge is deliberately NOT in this
+# list -- it is the Windows default browser and it kept being the thing that
+# opened. It stays available, but only if asked for by name: --browser edge or
+# a browser.txt containing "edge".
+BROWSER_CANDIDATES = [
+    ("chrome",   r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+    ("chrome",   r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+    ("chrome",   r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+    ("chromium", r"%ProgramFiles%\Chromium\Application\chrome.exe"),
+    ("firefox",  r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
+    ("firefox",  r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe"),
+    ("brave",    r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe"),
+]
+
+BROWSER_NAMES = {
+    "chrome": r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+    "firefox": r"%ProgramFiles%\Mozilla Firefox\firefox.exe",
+    "edge": r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+    "brave": r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe",
+}
+
+
+def _expand(p):
+    return os.path.expandvars(os.path.expanduser(p or ""))
+
+
+def browser_override():
+    """browser.txt next to hub.py: a name (chrome/firefox/edge/brave) or a path."""
+    try:
+        with open(BROWSER_FILE, encoding="utf-8") as fh:
+            for line in fh:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                low = s.lower()
+                if low in BROWSER_NAMES:
+                    s = BROWSER_NAMES[low]
+                return _expand(s) if os.path.isfile(_expand(s)) else None
+    except Exception:
+        pass
     return None
+
+
+def find_browser():
+    """(kind, exe) for the browser the hub should use, or (None, None)."""
+    forced = browser_override()
+    if forced:
+        name = os.path.basename(forced).lower()
+        kind = ("firefox" if "firefox" in name else
+                "brave" if "brave" in name else
+                "edge" if "msedge" in name else "chrome")
+        return kind, forced
+    for kind, pat in BROWSER_CANDIDATES:
+        exe = _expand(pat)
+        if os.path.isfile(exe):
+            return kind, exe
+    return None, None
+
+
+def browser_argv(url, profile_dir):
+    """Command line that opens `url` as an app window where the browser allows it."""
+    kind, exe = find_browser()
+    if not exe:
+        return None
+    if kind == "firefox":
+        # Firefox has no --app mode; a private profile + a new window is as close
+        # as it gets, and -no-remote keeps it out of the user's own session.
+        return [exe, "-no-remote", "-new-instance", "-profile", profile_dir,
+                "-new-window", url]
+    return [exe, f"--app={url}",
+            "--window-size=1280,820",
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-features=Translate,DisableLoadExtensionCommandLineSwitch",
+            "--no-first-run", "--no-default-browser-check",
+            f"--user-data-dir={profile_dir}"]
 
 
 def find_python():
     exe = sys.executable
     return exe if exe and os.path.isfile(exe) else (shutil.which("python") or "python")
+
+
+def lan_ip():
+    """This machine's LAN address -- the one a phone on the same wifi can use."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def request_hostname(handler, default=""):
+    """The host the client actually used to reach us.
+
+    The relay runs on its own port, so the URL we hand back has to keep the
+    client's host and swap the port. Returning 127.0.0.1 here is what made a
+    phone's "play" button do nothing at all.
+    """
+    raw = (handler.headers.get("Host") or "").strip()
+    if raw:
+        if raw.startswith("["):                    # [fe80::1]:8790
+            return raw.split("]")[0] + "]"
+        if raw.count(":") == 1:
+            return raw.rsplit(":", 1)[0]
+        return raw
+    return default or lan_ip() or "127.0.0.1"
 
 
 def free_port(start=8900, end=8960):
@@ -456,8 +568,10 @@ def resolve_game(page):
     """Try each feed until one actually starts playing."""
     now = time.time()
     hit = GAME_CACHE.get(page)
-    if hit and now - hit[0] < GAME_TTL:
-        return hit[1]
+    if hit:
+        ok = bool((hit[1].get("probe") or {}).get("ok"))
+        if now - hit[0] < (GAME_TTL if ok else 45):
+            return hit[1]
     links = feed_links(page) or [page]
     tried = []
     winner = None
@@ -471,6 +585,21 @@ def resolve_game(page):
         winner = {"url": links[0], "probe": {"ok": False}, "tried": tried}
     GAME_CACHE[page] = (now, winner)
     return winner
+
+
+def playable_target(res):
+    """The URL a browser can navigate to for this game.
+
+    probe_play reports the frame the picture was seen in, and that frame is
+    often `about:srcdoc` -- a document that exists only inside its parent, so
+    pointing an iframe or a tab at it yields a blank screen. Fall back to the
+    feed page itself, which is the thing that was playing.
+    """
+    probe_info = res.get("probe") or {}
+    frame = (probe_info.get("frame") or "").strip()
+    if not re.match(r"^https?://", frame, re.I):
+        frame = ""
+    return frame or (res.get("url") or "")
 
 
 SHELL_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -609,6 +738,15 @@ def stop_relay(url):
         pass
 
 
+def _stop_everything():
+    """Retire every relay, then exit. Used by /api/shutdown (PC launcher)."""
+    time.sleep(0.4)                      # let the HTTP reply reach the client
+    for k in list(RELAYS.keys()):
+        stop_relay(k)
+    time.sleep(0.3)
+    os._exit(0)
+
+
 def start_relay(url, low=False):
     key = url + ("#low" if low else "")
     with RELAY_LOCK:
@@ -633,23 +771,29 @@ def start_relay(url, low=False):
     window = "5" if low else "10"
     prefetch = "3" if low else "6"
     cmd = [find_python(), RELAY, "--url", url, "--port", str(port),
+           "--host", RELAY_HOST,
            "--window", window, "--prefetch", prefetch, "--idle-timeout", "900"]
     creation = 0x08000000  # CREATE_NO_WINDOW
     proc = subprocess.Popen(cmd, cwd=NBA_DIR, creationflags=creation,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with RELAY_LOCK:
         RELAYS[key] = (proc, port)
+    # Return as soon as the relay is *listening*, not when its buffer is full.
+    # Waiting for /health==200 held the click for 6-10 s; the page can start
+    # hls.js against a relay that answers 503 and retries the manifest itself.
     deadline = time.time() + 30
     while time.time() < deadline:
         if proc.poll() is not None:
             return 0
         try:
             r = fetch(f"http://127.0.0.1:{port}/health", timeout=2)
-            if r.status == 200:
+            return port if r.status in (200, 503) else port
+        except urllib.error.HTTPError as exc:
+            if exc.code == 503:          # warming: the socket is up, that is enough
                 return port
         except Exception:
             pass
-        time.sleep(0.6)
+        time.sleep(0.2)
     return 0
 
 
@@ -674,7 +818,19 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.do_GET()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _static(self, name, ctype):
         for base in (ROOT, NBA_DIR, os.path.dirname(NBA_DIR)):
@@ -686,6 +842,18 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, "not found", "text/plain")
 
     def do_GET(self):
+        try:
+            return self._route()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as exc:
+            log_exc("GET " + self.path, exc)
+            try:
+                self._send(500, '{"ok":false,"error":"hub handler error"}')
+            except Exception:
+                pass
+
+    def _route(self):
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
 
@@ -693,6 +861,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html", "text/html; charset=utf-8")
         if u.path == "/hls.min.js":
             return self._static("hls.min.js", "application/javascript")
+
+        if u.path == "/api/ping":
+            # the app scans the LAN for this: it is the only way to find the PC
+            # without the user typing an IP that DHCP may have changed
+            host = request_hostname(self)
+            port = self.server.server_port
+            kind, exe = find_browser()
+            return self._send(200, json.dumps({
+                "ok": True, "app": "nbahub", "version": HUB_VERSION,
+                "lan": f"http://{host}:{port}/", "hub": f"http://{host}:{port}",
+                "relay_host": RELAY_HOST, "browser": kind or "", "browser_exe": exe or "",
+                "time": time.strftime("%H:%M:%S"),
+            }))
+
+        if u.path == "/api/shutdown":
+            # local helper only: the PC launcher owns the lifecycle and calls this
+            # when the app window closes. Anything off this machine is refused,
+            # otherwise a phone (or any page that guessed the port) could stop the hub.
+            peer = (self.client_address or ("",))[0]
+            if peer not in ("127.0.0.1", "::1", "localhost"):
+                return self._send(403, '{"ok":false,"error":"localhost only"}')
+            self._send(200, json.dumps({"ok": True, "stopping": True,
+                                        "relays": len(RELAYS)}))
+            threading.Thread(target=_stop_everything, daemon=True).start()
+            return
 
         if u.path == "/api/games":
             date = (qs.get("date") or [""])[0]
@@ -732,11 +925,25 @@ class Handler(BaseHTTPRequestHandler):
                 info = json.loads(fetch(f"http://127.0.0.1:{port}/stats", timeout=4).read())
             except Exception:
                 pass
+            host = request_hostname(self)
             return self._send(200, json.dumps({
                 "ok": True,
-                "url": f"http://127.0.0.1:{port}/live.m3u8",
+                "url": f"http://{host}:{port}/live.m3u8",   # host the client used, relay port
+                "local": f"http://127.0.0.1:{port}/live.m3u8",
+                "port": port,
                 "stats": info,
             }))
+
+        if u.path == "/api/relaystats":
+            # fallback for clients that cannot reach the relay port directly
+            port = (qs.get("p") or [""])[0]
+            if not port.isdigit():
+                return self._send(400, '{"ok":false}')
+            try:
+                return self._send(200, fetch(f"http://127.0.0.1:{port}/stats", timeout=4).read(),
+                                  "application/json")
+            except Exception as exc:
+                return self._send(200, json.dumps({"ok": False, "error": str(exc)}))
 
         if u.path == "/api/health":
             page = (qs.get("u") or [""])[0]
@@ -770,12 +977,15 @@ class Handler(BaseHTTPRequestHandler):
             if not page:
                 return self._send(400, '{"ok":false,"error":"missing u"}')
             res = resolve_game(page)
-            frame = (res.get("probe") or {}).get("frame") or ""
+            probe_info = res.get("probe") or {}
+            target = playable_target(res)
             return self._send(200, json.dumps({
-                "ok": bool(res.get("probe", {}).get("ok")),
-                "frame": frame,
+                "ok": bool(probe_info.get("ok")),
+                "frame": target,
+                "open": target,
                 "source": res["url"],
-                "probe": res.get("probe", {}),
+                "event": page,
+                "probe": probe_info,
             }))
         if u.path == "/watch":
             target = (qs.get("u") or [""])[0]
@@ -804,31 +1014,39 @@ class Handler(BaseHTTPRequestHandler):
             if not page:
                 return self._send(400, '{"ok":false,"error":"missing u"}')
             res = resolve_game(page)
-            target = res["url"]
-            frame = (res.get("probe") or {}).get("frame") or ""
-            br = find_browser()
-            if not br:
-                return self._send(200, json.dumps({"ok": False, "url": target,
-                                                   "error": "no chrome/edge"}))
+            target = playable_target(res)
             # if we found the player host, show ONLY that, inside our own shell:
             # no site nav, no chat column, no ad overlays
             open_url = target
-            if frame and "iframe" in frame:
+            if target and target != res["url"]:
                 open_url = (f"http://127.0.0.1:{self.server.server_port}/watch?u=" +
-                            urllib.parse.quote(frame, safe=""))
-            args = [br, f"--app={open_url}", "--window-size=1280,820",
-                    "--autoplay-policy=no-user-gesture-required",
-                    "--disable-features=Translate,DisableLoadExtensionCommandLineSwitch",
-                    "--no-first-run", "--no-default-browser-check",
-                    f"--user-data-dir={PROFILE_DIR}"]
+                            urllib.parse.quote(target, safe=""))
+            args = browser_argv(open_url, PROFILE_DIR)
+            if not args:
+                return self._send(200, json.dumps({"ok": False, "url": target,
+                                                   "error": "no browser found (see browser.txt)"}))
             try:
                 subprocess.Popen(args, close_fds=True)
             except Exception as exc:
                 return self._send(200, json.dumps({"ok": False, "url": target, "error": str(exc)}))
             return self._send(200, json.dumps({"ok": True, "url": open_url,
-                                               "source": target, "frame": frame,
+                                               "browser": args[0],
+                                               "source": res["url"], "frame": target,
                                                "probe": res.get("probe", {}),
                                                "tried": res.get("tried", [])}))
+
+        if u.path == "/api/open":
+            target = (qs.get("u") or [""])[0]
+            if not target:
+                return self._send(400, '{"ok":false,"error":"missing u"}')
+            args = browser_argv(target, PROFILE_DIR)
+            if args:
+                try:
+                    subprocess.Popen(args, close_fds=True)
+                except Exception as exc:
+                    return self._send(200, json.dumps({"ok": False, "error": str(exc)}))
+                return self._send(200, json.dumps({"ok": True, "browser": args[0]}))
+            return self._send(200, '{"ok":false,"error":"no browser found"}')
 
         if u.path == "/api/open":
             target = (qs.get("u") or [""])[0]
@@ -890,11 +1108,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global RELAY_HOST
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--open", action="store_true")
     ap.add_argument("--host", default="0.0.0.0", help="0.0.0.0 = reachable from your phone")
     args = ap.parse_args()
+
+    RELAY_HOST = "0.0.0.0" if args.host in ("0.0.0.0", "::", "") else "127.0.0.1"
 
     try:
         srv = ThreadingHTTPServer((args.host, args.port), Handler)
@@ -902,18 +1123,11 @@ def main():
         print(f"port {args.port} busy: {exc}", file=sys.stderr)
         sys.exit(1)
     url = f"http://127.0.0.1:{args.port}/"
-    lan = ""
-    try:
-        import socket as _s
-        probe = _s.socket(_s.AF_INET, _s.SOCK_DGRAM)
-        probe.connect(("8.8.8.8", 80))
-        lan = probe.getsockname()[0]
-        probe.close()
-    except Exception:
-        pass
+    lan = lan_ip()
     print(f"nba hub at {url}")
     if lan and args.host == "0.0.0.0":
         print(f"phone url  http://{lan}:{args.port}/")
+    print(f"relay binds {RELAY_HOST} (ports 8900-8959)")
     if args.open:
         webbrowser.open(url)
     try:

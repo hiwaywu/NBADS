@@ -3,9 +3,15 @@ NBA -- one click stream launcher
 
 START HERE
 ----------
-NBAHUB.bat      (desktop icon: "NBA Hub")   <-- the nice one, use this
-                A local page: games listed by date on the left, NBA TV under
-                them, player on the right. Pick a game, it opens the player.
+NBAHub.exe      <-- the PC app. Double-click it.
+                Starts the server if needed and opens a real app window (no
+                tabs, no address bar). Close that window and everything stops.
+                Options: --local (this PC only), --port 8791, --size 1600x900.
+                Log: %LOCALAPPDATA%\NBAHubPC\launcher.log
+
+NBAHUB.bat      same job from a .bat (it now just starts NBAHub.exe when that
+                exists, otherwise it starts the server and opens a Chrome app
+                window itself). Use it when the exe has not been built.
 
 The older one-click icon still works:
 NBA.bat         Plays NBA TV straight away, no page, no list.
@@ -67,6 +73,30 @@ The browser route is deliberate: those pages gate the player behind a click and
 an ad, and your ad blocker cleans that up better than a script can.
 
 
+THE PHONE
+---------
+Install releases\NBAHub.apk (or android\NBAHub.apk after a rebuild) on a phone
+that is on the same wifi as this PC, and run NBAHUB.bat here.
+
+  first run      the app scans the wifi for this PC and saves the address
+  long-press     type an address by hand, or press "scan wifi" again
+  NBA TV rows    play inside the app, over the wifi, buffered by relay.py
+  game rows      open in the phone's browser - on purpose: those feeds are
+                 Widevine and a WebView has no DRM, so the frame would be black
+  "hub" chip     after a game sends you to the site, tap it to come back
+
+If the phone says "can't reach the hub", the PC side is the problem: the server
+must run with --host 0.0.0.0 (NBAHUB.bat does), and the firewall needs inbound
+TCP 8790 (hub) and 8900-8959 (relays).
+
+What was broken until this round, so it does not come back:
+  - /api/play answered http://127.0.0.1:<port>, which the phone resolves to
+    itself. The URL is now built from the request's Host header, and relay.py
+    gets --host 0.0.0.0.
+  - the page had no phone layout at all (352 px rail on a 411 px screen).
+  - /api/resolve could return "about:srcdoc" as the frame to embed.
+
+
 THE FILES
 ---------
 feeds.txt    your permanent channel list.   Format:  NAME | URL  (top tried first)
@@ -78,6 +108,9 @@ refresh.ps1  link hunter (don't delete)
 check.ps1    quality check
 relay.py     the local buffer + rendition picker (don't delete)
 sniff.py     experimental: headless-browser stream sniffer (not wired in)
+hub\         the browser UI + server:  NBAHUB.bat  FIREWALL.bat  hub.py
+             index.html  hls.min.js  probe_play.py  find_stream.py
+hub\hub.err.log  written only when a request handler throws - read it first
 rec\         recordings land here
 relay.log    buffer log, useful if something looks wrong
 

@@ -488,16 +488,19 @@ adb shell wm density 420
 ![app](docs/s3.png)
 ![player](docs/s4.png)
 
-### 10.3 What did **not** pass — `UNVERIFIED`
+### 10.3 What did **not** pass at the time — later resolved, read §13
 
-`<video>` stayed at `0:00` on the emulator even after a direct tap on the play overlay,
-while the manifest parsed and segments were fetched. That is a **decode** failure, and the
-emulator is the prime suspect (software-rendered x86 image, `-no-audio`, no hardware codec
-path). It could not be distinguished from a real device bug without a physical Fold 7.
+The first run recorded `<video>` stuck at `0:00` on the emulator after the manifest parsed and
+segments were fetched, and blamed **decode** (proposed fix: replace WebView with ExoPlayer).
 
-If the picture is black on the real phone, the fix is known and scoped: **replace the WebView
-with ExoPlayer/media3**, which decodes HLS natively on Samsung hardware. That requires the
-media3 dependency and a real Gradle (or a manual AAR merge) — not attempted here.
+That diagnosis was wrong. **§13** found the real causes: the relay handed the phone
+`http://127.0.0.1:<port>` (the phone's own loopback) while the relay itself only listened on
+`127.0.0.1`, and the page had no phone layout at all. With both fixed, the same WebView shell
+decodes NBA TV at `1920x1080 @ 59.940 fps`, `readyState 4`, `currentTime` advancing — measured
+over CDP (`docs/cdp.py`), not guessed. No media3/ExoPlayer port was needed.
+
+Video decode on an emulator is still a poor signal: a software-rendered x86 image dies after a
+few minutes of 1080p60. Judge decode on a real device.
 
 ### 10.4 How to reproduce the desktop path
 
@@ -549,3 +552,522 @@ player shell.
 - **Windows firewall** needs an inbound rule for 8790 on the PC:
   `netsh advfirewall firewall add rule name="NBA Hub 8790" dir=in action=allow protocol=TCP localport=8790`
   (admin). Without it the phone hangs on "connecting".
+- **The relay ports need the same rule** (8900-8959). The hub can proxy stats, but the video
+  itself is read straight from the relay.
+
+---
+
+## 13. "The Android player does not play" — what it actually was
+
+The phone shell loaded, listed games and looked alive, and no stream ever appeared. Six
+separate defects, each enough on its own to produce exactly that. All are fixed in this tree;
+the Android rebuild is `versionName 1.3`.
+
+### 13.1 The one-line killer: a loopback URL in a remote client
+
+```python
+# hub.py, /api/play, before
+return {"url": f"http://127.0.0.1:{port}/live.m3u8"}      # ...and relay.py bound 127.0.0.1
+```
+
+`127.0.0.1` is resolved **by the client**, so the phone asked itself for the stream. Then
+hls.js got `ERR_CONNECTION_REFUSED` and the UI showed nothing at all — no error, no spinner,
+which is why it read as "the player is broken".
+
+Fix, both halves:
+
+```python
+RELAY_HOST = "0.0.0.0" if args.host in ("0.0.0.0", "::") else "127.0.0.1"   # main()
+cmd = [python, RELAY, "--url", url, "--host", RELAY_HOST, ...]              # start_relay()
+host = request_hostname(self)          # the Host the client used, port stripped
+return {"url": f"http://{host}:{port}/live.m3u8", "local": f"http://127.0.0.1:{port}/live.m3u8"}
+```
+
+Rule: **the hub may hand out only addresses the caller can dial.** Derive them from the request
+(`Host`), never from the server's idea of itself. `/api/relaystats?p=<port>` exists for clients
+whose firewall blocks 8900-8959; `/stats` is also readable directly.
+
+### 13.2 A desktop layout on a 411 px screen
+
+The page was a 352 px rail plus a stage, with no media query. On the phone the game list took
+the whole width, the video sat off-screen to the right, and the only visible text was a
+half-rendered welcome paragraph (`docs/mobile_before.png`).
+
+Fix: one `@media (max-width: 900px)` block — column order, 16:9 stage on top with
+`max-height:46vh`, rows at 13 px padding, bar wrapping instead of overflowing. The desktop
+branch is untouched (verified at 1440x900: `sideWidth 352`, stage 866 px).
+
+### 13.3 `frame: "about:srcdoc"` is not a URL
+
+`probe_play.py` reports the frame that is playing, and the player is often inside a
+`srcdoc`/`data:` frame:
+
+```json
+{"ok": true, "reason": "playing", "w": 480, "h": 480, "frame": "about:srcdoc"}
+```
+
+`/api/resolve` passed that straight through (truncated to 120 chars), and `/watch` pointed an
+iframe at a document that only exists inside its parent → blank shell, forever.
+
+Fix: sanitize before use, and fall back to the feed page that was actually playing.
+
+```python
+def playable_target(res):
+    frame = (res.get("probe") or {}).get("frame") or ""
+    if not re.match(r"^https?://", frame, re.I):
+        frame = ""                       # nothing can be navigated to this
+    return frame or (res.get("url") or "")
+```
+
+Also: failures are now cached for 45 s, not 15 min, so a page that starts working at tip-off is
+re-probed instead of staying dead in the cache for the whole first quarter.
+
+### 13.4 EME cannot exist on `http://192.168.1.6`
+
+Measured in the phone's WebView over CDP:
+
+```json
+{"url": "http://192.168.1.6:8790/?chan=0", "secure": false,
+ "widevine": "no EME"}
+```
+
+`navigator.requestMediaKeySystemAccess` is **undefined** there — Chromium removes it outside a
+secure context, and that WebView build exposes no EME at all. So an embedded frame of a
+Widevine stream is not a "sometimes black" case; it is *never* a picture, on any phone.
+
+Fix, in `watchGame()`:
+
+```js
+const CAN_DRM = (typeof navigator.requestMediaKeySystemAccess === 'function') && window.isSecureContext;
+...
+if (IN_APP && !CAN_DRM && window.Hub && Hub.openExternal) {
+  Hub.openExternal(target);            // hand the URL to Chrome / any browser
+  return;                              // the browser has a CDM and a secure origin
+}
+```
+
+Consequence, stated plainly: **games on the phone open in the browser**; channels stay in the
+app. Do not spend another afternoon trying to embed them.
+
+### 13.5 Fullscreen was a no-op in the app
+
+`document.documentElement.requestFullscreen()` has no implementation in Android WebView, and
+the `allowfullscreen` attribute on an iframe does nothing without
+`WebChromeClient.onShowCustomView`. The fullscreen button looked dead.
+
+Fix, both sides:
+
+```js
+// page: the video path is the only one WebView implements
+let req = (el.tagName === 'VIDEO' && el.webkitEnterFullscreen) ? el.webkitEnterFullscreen
+        : (el.requestFullscreen || el.webkitRequestFullscreen);
+```
+
+```java
+// MainActivity: swap in the custom view, hide the webview, and back out cleanly
+public void onShowCustomView(View v, CustomViewCallback cb) { ... }
+public void onHideCustomView() { ... }
+```
+
+### 13.6 An IP address baked into the APK
+
+`DEFAULT_URL = "http://192.168.1.6:8790/"`. One DHCP lease change and the app can never work,
+with "connecting to 192.168.1.6..." as the only clue. The old fallbacks (`10.0.2.2`,
+`127.0.0.1`) are emulator-only.
+
+Fix: the app scans for something that answers `GET :8790/api/ping` with
+`{"app":"nbahub"}` — 48 threads, first hit wins, then it saves the URL and reloads itself.
+`/api/ping` is new and exists for exactly this. Long-press still lets you type an address, and
+the dialog has a `scan wifi` button.
+
+Two details that had to be got right, both found by testing with a deliberately wrong
+`DEFAULT_URL` (`192.168.1.250`) and `pm clear`:
+
+- **Which /24s.** The phone's own interfaces are not enough: an emulator sits on `10.0.2.x`
+  while the PC it wants is on `192.168.1.x`. The scanner therefore probes every local /24
+  **plus** the /24 of the saved/default server host.
+- **The probe must not be a raw socket with a tight timeout.** At `220 ms` connect every
+  candidate "timed out" — this emulator's NAT hop alone is ~150 ms RTT — so the scan reported
+  a perfectly reachable hub as absent. It is now `HttpURLConnection` with `450 ms` connect /
+  `900 ms` read, which also honours the system proxy. Verified: `lan scan prefixes
+  [10.0.2., 192.168.1.]` → `lan scan found http://10.0.2.2:8790/` → saved → page reloaded.
+
+The scan costs nothing on the happy path: it only starts when the page fails to load.
+
+
+### 13.7 Two build/packaging traps, hit again
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | `android/debug.keystore` is gitignored, so a fresh tree signs with a *new* key | `adb uninstall com.nbahub.app` first |
+| `/hls.min.js` 404 on a clean checkout | the file is gitignored and only `NBAHUB.bat` downloads it | vendored in `nba/hub/hls.min.js` (1.5.20) |
+
+### 13.8 How this was verified (no hand-waving)
+
+`WebView.setWebContentsDebuggingEnabled(true)` plus a socket forward gives scripted access to
+the phone's page:
+
+```powershell
+adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof com.nbahub.app)
+python docs\cdp.py eval "JSON.stringify({secure: isSecureContext, hls: Hls.version, v: {rs: v.readyState, t: v.currentTime}})"
+```
+
+Recorded results:
+
+| Check | Result |
+|---|---|
+| channel playlist over the LAN | `http://192.168.1.6:8900/live.m3u8`, `#EXT-X-MEDIA-SEQUENCE:30372` |
+| **all four NBA TV feeds, phone** | `1920x1080` each, `readyState 4`, media clock advancing 3 s per 3 s wall clock, 50–70 s buffered, 5–315 Mbps pull, no `mediaError` |
+| channel switching in-session | `playChannel(channels[1])` → title + `29.970fps` pill update, new relay on a new port, previous relay retired |
+| single-rendition feed pill | relay has no `RESOLUTION` → pill falls back to `videoWidth x videoHeight` (`1920x1080`) instead of `-` |
+
+| phone playback (Pixel API 34) | `readyState 4`, `currentTime 135.5`, `1920x1080`, `paused false` |
+| phone UI | `docs/mobile_channel.png` — 1080p60 pill, `70s buffered · pull 96 Mbps` |
+| foldable inner display | desktop layout at 2184x1968 (correct: > 900 px), same stream playing |
+| desktop page | `sideWidth 352`, stage 866 px, `1920x1080 @ 59.940fps`, 0 console errors |
+| game handoff | `Hub.openExternal` → `ActivityTaskManager: START ... cmp=com.android.chrome/...IntentDispatcher` |
+| Widevine in WebView | `no EME` (this is a finding, not a bug we can fix) |
+
+`docs/desktop_check.py` re-runs the desktop half; `docs/cdp.py` drives the phone.
+
+### 13.9 Rules that came out of this round
+1. **A localhost URL is client-relative.** Any URL crossing a network boundary must be built
+   from the request's `Host`, not from the server's own address.
+2. **Bind the relay where the client can reach it.** `--host` is now a required thought, not a
+   default.
+3. **A resource that a launcher downloads at runtime must also exist in the repo** — otherwise
+   the phone gets a 404'd player library and a silent dead button.
+4. **Check `isSecureContext` before promising DRM.** EME's absence is a property of the origin
+   and the webview build, and it is cheap to test (`typeof requestMediaKeySystemAccess`).
+5. **Never wrap `about:srcdoc` in an iframe.** Validate a URL scheme before you navigate to it.
+6. **Test layouts at a phone width, in the app, with a screenshot.** A responsive-looking page
+   can still put the video outside the viewport.
+7. **A pre-game aggregator page shows a countdown.** "Does not play" may mean "tip-off is in
+   25 hours"; say so in the row, or you will debug the wrong layer.
+
+### 13.10 Second pass: the things that bite after "it plays"
+
+Verification added in this pass: phone fullscreen (`#fs` → `webkitFullscreenElement true`,
+`video.webkitDisplayingFullscreen true`, `docs/mobile_fullscreen.png`) and Back (1st leaves
+fullscreen, page still `playing`; 2nd leaves the app, launcher resumed).
+
+**The firewall, again, but for the right ports.** 8790 was already open because inbound rules
+exist for `python.exe`/`pythonw.exe` on the *Public* profile — and this machine's networks are
+classified Public. On a Private/Domain network the same app hangs on "connecting" with nothing
+to see. `nba/hub/FIREWALL.bat` self-elevates and opens TCP `8790` and `8900-8959` on all
+profiles; `NBAHUB.bat` prints both URLs and points at it.
+
+```powershell
+Get-NetFirewallProfile | Select Name,Enabled,DefaultInboundAction
+Get-NetFirewallRule -Direction Inbound -Enabled True | ? DisplayName -match 'python|8790'
+```
+
+**A hub started from an agent shell dies with the shell.** `pythonw` launched from a tool call
+inherited that call's job object: the server was gone minutes later, with no crash in the event
+log and no output (pythonw has no console). Two fixes, both worth keeping:
+
+```powershell
+Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = '"...\pythonw.exe" hub.py --port 8790 --host 0.0.0.0'
+    CurrentDirectory = 'C:\AI STUFF\Local\nba\hub' }
+```
+
+and `hub.py` wraps every route in `try/except` → `hub.err.log`:
+
+```python
+def do_GET(self):
+    try:
+        return self._route()
+    except Exception as exc:
+        log_exc("GET " + self.path, exc)
+        self._send(500, '{"ok":false,"error":"hub handler error"}')
+```
+
+Without that file, "the server just stopped" is unfalsifiable. (The original instance had been
+started by hand from `NBAHUB.bat` and ran for hours; only tool-spawned copies died.)
+
+**`probe_play.py` reported the wrong frame.** It answered `frame: "about:srcdoc"`, and it also
+accepted a 480x480 ad as "playing". Now:
+
+- `frame` is the nearest **ancestor** with an `http(s)` URL — that parent is the player host
+  worth embedding (`https://topstreamer.site/iframe/nba/clippers`), not the srcdoc document;
+- candidates rank by *live* (`duration == Infinity`), then `readyState`/`currentTime`, then
+  pixel area, so an ad reel cannot win;
+- `video_frame` keeps the exact frame URL for debugging.
+
+Checked against a pre-game page (`docs/page_dump.py`): no `<video>` elements at all, body says
+`STREAMS OPEN IN 1 DAYS 07 HOURS` → the probe answers `{"ok": false, "reason": "no video
+started in time"}` and the app offers "open the page anyway". The clean-player-host path can
+only be confirmed once a game is actually live; until then it degrades to the feed page, which
+still plays.
+
+**Android Back did the wrong thing.** On the hub, `web.canGoBack()` was true after visiting a
+game, so Back walked into history and could land on `about:blank` — a white screen that reads
+as a crash. Now: fullscreen → exit fullscreen; foreign page → `goBack()`; hub → let the
+activity finish (normal app exit).
+
+**The emulator, not the app.** `qemu-system-x86_64-headless.exe` crashed twice with
+`Exception code 0xc0000005` in the Application log, both times minutes into 1080p60 software
+decode. The same APK and page then ran fine on a freshly booted AVD with `-gpu host`. If the
+emulator "kills the app", read the event log before touching the code:
+
+```powershell
+Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddHours(-1)} |
+  ? ProviderName -match 'Application Error' | select TimeCreated,Message
+```
+
+### 13.11 The PC app: a 20 KB exe, and what owning a lifecycle costs
+
+The browser page is the product; a double-clickable app is the delivery. `pc/NBAPC.cs` compiles
+with the .NET Framework `csc.exe` that ships on every Windows box — 20 KB, no installer, no
+runtime download:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File pc\build-pc.ps1
+# csc /target:winexe /win32icon:app.ico /r:System.Management.dll ... -> nba\hub\NBAHub.exe
+```
+
+What it does, in order: single-instance mutex → reuse a hub that already answers
+`/api/ping`, else find `pythonw` (PATH, then `%LOCALAPPDATA%\Programs\Python\Python3*`) → spawn
+`hub.py` on a free port → wait for `/api/ping` → open Chrome/Edge with
+`--app=http://127.0.0.1:<port>/ --user-data-dir=<hub>\appprofile` → block until the window is
+gone → `GET /api/shutdown` → wait, then kill if needed.
+
+Four things that had to be designed, not assumed:
+
+1. **The server needs an owner that can stop it.** `hub.py` grew `/api/shutdown`, and it
+   refuses anything that is not loopback — otherwise a phone on the wifi could stop the hub:
+   ```python
+   peer = (self.client_address or ("",))[0]
+   if peer not in ("127.0.0.1", "::1", "localhost"): return self._send(403, ...)
+   ```
+2. **Only the owner may stop it.** If the app reuses a hub started by `NBAHUB.bat`, closing the
+   window must *not* kill that server. `startedByUs` decides, and it is in the log.
+3. **`--app` may hand off to an already-running browser.** The process we started can exit while
+   the window is still open, so "browser exited" is not "window closed". After the process
+   exits, poll WMI for `chrome.exe`/`msedge.exe` command lines containing our profile path, and
+   keep waiting while any remain.
+4. **Launched-from-a-tool ≠ launched-by-a-user.** `Win32_Process.Create` runs the child in the
+   tool's session; a **GUI** exe started that way died instantly and silently (no window, no
+   log — the log call itself needs a loaded user profile). `Start-Process` worked. Rule: use WMI
+   for headless Python helpers, `Start-Process`/`start` for anything with a window, and give the
+   launcher its own log (`%LOCALAPPDATA%\NBAHubPC\launcher.log`) because there is no console.
+
+Verified lifecycle, from the log:
+
+```text
+11:45:43 no hub on 8796, looking for pythonw
+11:45:43 spawned hub pid=42252
+11:45:44 hub answering=True
+11:45:44 browser pid=52512
+11:46:53 app window closed
+11:46:53 shutting the hub down
+11:46:54 done        -> 0 launcher, 0 listeners, hub pid gone
+```
+
+Reuse path: with a hub already on 8790, launching the exe left the Python process count
+unchanged, and closing its window left the pre-existing hub answering.
+
+### 13.12 Fullscreen must letterbox — "it stretches the picture"
+
+Observed on the PC: pressing `fullscreen` filled the screen but distorted the picture. Two
+separate causes, both now gone.
+
+**Cause 1 — the element that goes fullscreen.** The button used to fullscreen the *video
+element* (`v.requestFullscreen()`), and on Android it called `v.webkitEnterFullscreen()`. The
+native path hands the picture to the platform player, which knows nothing about CSS
+`object-fit`. Fullscreen the **container** instead and let CSS own the geometry:
+
+```js
+const target = (el.tagName === 'VIDEO' && stage) ? stage : el;   // #stage, always
+if (target.requestFullscreen) target.requestFullscreen().catch(...);
+```
+
+**Cause 2 — the mobile layout's own rules followed us into fullscreen.** `#stage` carries
+`aspect-ratio:16/9` and `max-height:46vh` below 900 px; inside a fullscreen viewport those
+still applied, so the element was not the screen and the picture sat off-centre. The
+fullscreen rule now overrides them explicitly:
+
+```css
+#stage:fullscreen, #stage:-webkit-full-screen{
+  width:100vw !important; height:100vh !important;
+  max-height:none !important; aspect-ratio:auto !important;
+  display:flex; align-items:center; justify-content:center;
+}
+video, #stage:fullscreen video{ object-fit:contain !important; object-position:center !important }
+```
+
+Plus a visible `✕ exit full` button inside the stage (Esc works, but a TV-ish app should not
+depend on a keyboard), and `f`/`m`/`r` shortcuts on the PC.
+
+Measured, not eyeballed — a known 16:9 picture replaces the stream, the page's own button is
+pressed, then the screenshot is measured row by row (`docs/fs_hub_check.py`,
+`docs/phone_fs_check.py`):
+
+| Where | Viewport | Picture | Expected | Verdict |
+|---|---|---|---|---|
+| Chrome 156 (PC) | 1680x1050 (16:10) | 1680x945, bars 53/52 | 945 | 1.778 = 16:9 ✅ |
+| Android WebView | 1080x2400 (9:20) | 1080x609, bars 965/826 | 607.5 | 1.773 ✅ |
+
+The first attempt at this measurement lied twice, both worth remembering: the native video
+controls cover the bottom of the picture (measure with `v.controls = false`), and a
+`canvas.captureStream()` video is *not* a reliable aspect reference in Chromium — use a real
+file (`docs/white1080.mp4`).
+
+The Android picture sits ~137 px below the display centre because this AVD's window keeps the
+status-bar inset even with `FLAG_FULLSCREEN`, `FLAG_LAYOUT_IN_SCREEN`,
+`setDecorFitsSystemWindows(false)` and the legacy immersive flags all applied. The *ratio* is
+correct; the offset is the window manager, not the page.
+
+### 13.13 Latency: three places the time was going
+
+"Make it lag-free" is not one problem. Measured with `docs/lag_check.py` (desktop) and
+`docs/phone_lag_check.py` (WebView over CDP): click → first frame, then `hls.latency` every few
+seconds, plus a count of `waiting` events on the `<video>`.
+
+**1. The click waited for the buffer, not for the relay.** `/api/play` polled `/health` until the
+relay answered **200**, i.e. until three segments were downloaded — 6–10 s of spinner with
+nothing on screen. The relay is listeneing within ~300 ms; the player can retry the manifest
+itself (it already has a retry policy). So the hub now returns as soon as **any** HTTP status
+comes back from the relay:
+
+```python
+try:
+    r = fetch(f"http://127.0.0.1:{port}/health", timeout=2)
+    return port if r.status in (200, 503) else port
+except urllib.error.HTTPError as exc:
+    if exc.code == 503: return port          # warming, socket is up
+```
+
+and the page treats a 503 playlist as "retry in 700 ms" (`manifestLoadingMaxRetry: 10`).
+**6–10 s → 0.4–1.2 s** on the PC, ~2.9 s on the emulator.
+
+**2. The relay batched its edge updates.** The pump slept `target/2`..3 s, so a poll often
+picked up **two** new segments at once; the playlist's live edge jumped 12 s forward and the
+player — still at the old position — was suddenly 12 s further behind, until hls.js snapped.
+That is the sawtooth we measured (14 → 22.7 → 25 → 33.7 → 14). Two changes: poll at
+`target/3` (≤2 s) so the edge advances one segment at a time, and publish `ready` as soon as
+the **edge** segment lands (newest fetched first), not after three segments.
+
+**3. The player was not told where "live" is.** `hls.js` defaults are conservative. Now:
+
+```js
+enableWorker: true,                    // demux off the main thread
+liveSyncDurationCount: lowMode ? 1.25 : 2,   // start 7.5 s / 12 s behind the edge
+liveMaxLatencyDurationCount: target + 1.5,   // correct before it drifts
+maxLiveSyncPlaybackRate: 1.35,         // catch up by speeding up, not by jumping
+manifestLoadingMaxRetry: 10, manifestLoadingRetryDelay: 700,
+maxBufferLength: lowMode ? 15 : 30,
+```
+
+plus a visible `14.2s behind live` pill (no more guessing whether it feels off), and a hard
+ceiling: if latency ever exceeds `target*6+4`, seek to `hls.liveSyncPosition` once. For live
+sport a jump beats watching the past.
+
+Measured after the changes:
+
+| Path | click → first frame | behind live | stalls (45–60 s sample) |
+|---|---|---|---|
+| PC, default | 0.4–1.2 s | **14.6 s** avg (steady 14.1) | 0 |
+| PC, `low delay` | 1.07 s | **8.2 s** avg | 0 |
+| Android app | 2.9 s | **14.2 s** steady | 0 |
+
+The floor is the source, not us: NBA TV publishes **6-second segments**, and a player needs
+1.5–2 of them buffered to survive one slow fetch. ~8 s is the honest minimum without LL-HLS
+(partial segments), which these feeds do not offer. Below that the picture starts stalling,
+which is the thing the relay exists to prevent.
+
+### 13.14 "Why does it keep using Edge?"
+
+Because *something* asked for "the default browser", and on this machine
+`HKCU\...\UrlAssociations\http\UserChoice\ProgId = MSEdgeHTM`. Four different places could
+launch a browser and only two of them named a binary:
+
+| Path | Before | Now |
+|---|---|---|
+| `NBAHub.exe` app window | Chrome (already), but unlogged and unfixable | logged `browser=chrome exe=…`, Chrome → Firefox → Brave → Edge, `--browser` / `browser.txt` override |
+| `hub.py /api/watch` (game, PC) | Chrome, hard-coded flag list | same `browser_argv()` as above; response reports `"browser"` |
+| `hub.py /api/open` | `webbrowser.open()` → **the default = Edge** | `browser_argv()` too |
+| `games.ps1` (CLI) | `Start-Process $target` → default = Edge | still the default; use the app for the pinned browser |
+| Android `Hub.openExternal` (games) | implicit `ACTION_VIEW` → **system default = possibly Edge** | `setPackage("com.android.chrome")` → Firefox → chooser |
+
+The Android half needed one non-obvious fix. `getLaunchIntentForPackage("com.android.chrome")`
+returned **null** even with Chrome installed, so the code fell through to the chooser:
+
+```xml
+<queries>
+  <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent>
+  <package android:name="com.android.chrome"/>
+  <package android:name="org.mozilla.firefox"/>
+</queries>
+```
+
+Android 11+ package visibility: without `<queries>`, another app is invisible and the lookup is
+a silent null — no exception, no warning. After adding it, logcat says
+`opening in com.android.chrome` and the task resumes Chrome's activity.
+
+Firefox has no `--app`, so it is launched as
+`firefox.exe -no-remote -new-instance -profile <hub>\appprofile -new-window <url>`: a separate
+instance with its own profile, so it cannot disturb the user's session — but it does have
+browser chrome. Chrome/Brave/Edge get the frameless `--app` treatment.
+
+### 13.15 "Is the exe standalone?" — no, and the portable build
+
+23 KB of C# cannot contain a web server, an HLS relay and a browser engine. The exe is a
+**launcher**; the app is the folder. Measured dependencies (nothing assumed):
+
+```text
+nba\hub\hub.py  index.html  hls.min.js  probe_play.py  find_stream.py   ~0.5 MB
+nba\relay.py    feeds.txt                                              ~20 KB
+python 3.13               (runs hub.py and relay.py)                    23 MB
+requests + urllib3        (relay.py downloads segments with them)        3 MB
+chrome/chromium/firefox   (the app window IS that browser in --app)      installed
+.NET Framework 4.x        (what the launcher is compiled against)        in Windows
+playwright + chromium     (optional: game probing only)                 ~200 MB
+```
+
+Third-party imports were checked, not guessed: `requests.adapters`, `urllib3.util.retry`,
+`playwright.sync_api`, everything else stdlib.
+
+So the portable build carries its own interpreter:
+
+1. `python-3.13.7-embed-amd64.zip` → `<bundle>\python`
+2. uncomment `import site` in `python313._pth`
+3. `pip install --target <bundle>\python\Lib\site-packages requests urllib3 certifi idna charset_normalizer`
+4. app files in the layout `hub.py` expects: `<bundle>\nba\hub\hub.py` and `<bundle>\nba\relay.py`
+5. launcher change — look up before looking at PATH:
+
+```csharp
+static string BundledPython(string hubDir) {
+    string d = hubDir;
+    for (int i = 0; i < 4; i++) {
+        if (string.IsNullOrEmpty(d)) break;
+        string cand = Path.Combine(d, "python", "pythonw.exe");
+        if (File.Exists(cand)) return cand;
+        d = Path.GetDirectoryName(d);
+    }
+    return null;
+}
+```
+
+Verified from a clean extract of the zip, on a throwaway port:
+
+```text
+no hub on 8807, looking for pythonw
+using the bundled interpreter
+pythonw=…\nba-portable-test\python\pythonw.exe      ← not the system Python
+spawned hub pid=59292 … hub answering=True
+browser=chrome exe=C:\Program Files\Google\Chrome\Application\chrome.exe
+/api/play → segments_cached 5, buffered 35 s, upstream 51.7 Mbps   ← requests works from the bundle
+```
+
+Sizes: **11.8 MB zip**, 23.7 MB extracted (`python` 23.2, `nba` 0.5), launcher 23 KB. The
+first attempt measured 81.7 MB because the test run had left a browser profile inside the
+bundle — clean the profile out before zipping, or you ship the tester's cache.
+
+
+
+
+
+
+

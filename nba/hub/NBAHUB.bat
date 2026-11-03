@@ -3,6 +3,15 @@ setlocal EnableExtensions EnableDelayedExpansion
 title nba hub
 cd /d "%~dp0"
 
+REM ---------- 0. the PC app, when it has been built ----------
+REM  NBAHub.exe does the same job with a proper app window and a clean
+REM  shutdown (close the window -> server and relays stop). Build it with
+REM  ..\..\pc\build-pc.ps1, or just double-click NBAHub.exe directly.
+if exist "%~dp0NBAHub.exe" (
+    start "" "%~dp0NBAHub.exe" %*
+    exit /b 0
+)
+
 set "PORT=8790"
 set "URL=http://127.0.0.1:%PORT%/"
 
@@ -68,6 +77,17 @@ if not defined UP (
     pause
     exit /b 1
 )
+
+REM ---------- 4. tell the phone where to look ----------
+echo.
+echo   desktop:  %URL%
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
+    for /f "tokens=* delims= " %%b in ("%%a") do echo   phone:    http://%%b:%PORT%/
+)
+echo.
+echo   The app finds this PC by itself. If it cannot, run FIREWALL.bat once
+echo   (as admin) to open ports 8790 and 8900-8959.
+echo.
 
 REM open as a real app window (no tabs, no address bar) when Chrome exists
 set "CHROME=%ProgramFiles%\Google\Chrome\Application\chrome.exe"

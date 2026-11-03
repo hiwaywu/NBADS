@@ -1,15 +1,17 @@
 # build output
 android/build/
 android/debug.keystore
+android/*.idsig
 *.keystore
+dist/
 
 # runtime state
 nba/hub/browserprofile/
 nba/hub/appprofile/
-nba/hub/hls.min.js
 nba/rec/
 nba/_src/
 nba/*.log
+nba/hub/*.log
 
 # python
 __pycache__/
@@ -18,3 +20,9 @@ __pycache__/
 # os
 Thumbs.db
 .DS_Store
+
+# big binaries live in GitHub Releases
+releases/*.zip
+
+# launcher build output (the shipped copy is nba/hub/NBAHub.exe)
+pc/*.exe
