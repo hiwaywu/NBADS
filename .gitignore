@@ -1,0 +1,20 @@
+# build output
+android/build/
+android/debug.keystore
+*.keystore
+
+# runtime state
+nba/hub/browserprofile/
+nba/hub/appprofile/
+nba/hub/hls.min.js
+nba/rec/
+nba/_src/
+nba/*.log
+
+# python
+__pycache__/
+*.pyc
+
+# os
+Thumbs.db
+.DS_Store

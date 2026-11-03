@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nba hub</title>
+<link rel="icon" href="data:,">
+<script src="/hls.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0c0f; --panel:#141519; --panel2:#191b20; --line:#23252c;
+    --txt:#e9eaee; --dim:#8b8f9a; --dim2:#5f636e;
+    --accent:#3ddc84; --accent-dim:#1f7a4c; --live:#ff4d4d;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg);color:var(--txt);
+    font:14px/1.45 -apple-system,"Segoe UI",Roboto,system-ui,sans-serif;
+    display:flex;overflow:hidden;
+  }
+  #side{
+    width:352px;min-width:352px;height:100%;background:var(--panel);
+    border-right:1px solid var(--line);display:flex;flex-direction:column;
+  }
+  #brand{
+    padding:14px 16px 10px;display:flex;align-items:center;gap:9px;
+    font-weight:700;letter-spacing:.2px;font-size:15px;
+  }
+  #brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+  #brand small{margin-left:auto;color:var(--dim2);font-weight:500;font-size:11px}
+  #datebar{display:flex;align-items:center;gap:6px;padding:0 12px 8px}
+  #datebar button{
+    background:var(--panel2);border:1px solid var(--line);color:var(--dim);
+    width:30px;height:30px;border-radius:7px;cursor:pointer;font-size:15px;line-height:1;
+  }
+  #datebar button:hover{color:var(--txt);border-color:#33363f}
+  #dateLabel{
+    flex:1;text-align:center;font-weight:600;font-size:13px;color:var(--txt);
+    background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+    padding:7px 8px;cursor:pointer;user-select:none;
+  }
+  #dateLabel:hover{border-color:#33363f}
+  #dateLabel .sub{display:block;font-weight:500;font-size:10.5px;color:var(--dim2);letter-spacing:.3px}
+  #search{
+    margin:0 12px 10px;padding:8px 10px;background:var(--panel2);
+    border:1px solid var(--line);border-radius:7px;color:var(--txt);
+    font-size:13px;outline:none;
+  }
+  #search:focus{border-color:var(--accent-dim)}
+  #note{display:none;margin:0 12px 8px;padding:7px 9px;border-radius:6px;
+        background:#1d1a12;border:1px solid #3a3220;color:#c9b382;font-size:11.5px;line-height:1.5}
+  #note.show{display:block}
+  #list{flex:1;overflow-y:auto;padding-bottom:24px}
+  #list::-webkit-scrollbar{width:8px}
+  #list::-webkit-scrollbar-thumb{background:#2a2d35;border-radius:4px}
+  .sect{
+    display:flex;align-items:center;gap:6px;padding:12px 16px 6px;
+    font-size:10.5px;letter-spacing:.9px;text-transform:uppercase;color:var(--dim2);
+  }
+  .sect .n{margin-left:auto;color:var(--dim2);font-size:10.5px}
+  .row{
+    display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer;
+    border-left:2px solid transparent;
+  }
+  .row:hover{background:var(--panel2)}
+  .row.on{background:#12181c;border-left-color:var(--accent)}
+  .row .txt{min-width:0;flex:1}
+  .row .nm{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .mt{font-size:10.5px;color:var(--dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .badge{
+    font-size:10px;font-weight:700;letter-spacing:.4px;padding:2px 6px;
+    border-radius:4px;background:#22252c;color:var(--dim);flex:none;
+  }
+  .badge.hd{background:#16281f;color:var(--accent)}
+  .badge.live{background:#2a1414;color:#ff4d4d}
+  .empty{padding:18px 16px;color:var(--dim2);font-size:12.5px;line-height:1.6}
+  #main{flex:1;display:flex;flex-direction:column;min-width:0;background:#000}
+  #stage{flex:1;position:relative;background:#000;display:flex;align-items:center;justify-content:center}
+  video{width:100%;height:100%;object-fit:contain;background:#000;display:none}
+  body.iframeMode #pf{display:block !important}
+  body.iframeMode video{display:none}
+  body.iframeMode #idle{display:none}
+  body.playing video{display:block}
+  #idle{
+    position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:14px;text-align:center;color:var(--dim2);padding:24px;
+  }
+  #idle h1{margin:0;font-size:19px;color:#3c4049;font-weight:600;letter-spacing:.2px}
+  #idle p{margin:0;font-size:12.5px;max-width:420px;line-height:1.7}
+  #spinner{
+    position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    flex-direction:column;gap:12px;background:rgba(0,0,0,.72);z-index:5;font-size:12.5px;color:var(--dim)
+  }
+  #spinner.show{display:flex}
+  .ring{
+    width:34px;height:34px;border-radius:50%;border:3px solid #23262d;
+    border-top-color:var(--accent);animation:spin .8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #bar{
+    height:34px;display:flex;align-items:center;gap:12px;padding:0 14px;
+    background:var(--panel);border-top:1px solid var(--line);font-size:11.5px;color:var(--dim2);
+  }
+  #bar .title{color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:44%}
+  #bar .pill{background:#1b1e24;border-radius:5px;padding:2px 7px;color:var(--dim)}
+  #bar .pill.good{color:var(--accent)}
+  #bar .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+  #bar button{
+    background:#1b1e24;border:1px solid var(--line);color:var(--dim);
+    border-radius:6px;padding:4px 9px;font-size:11.5px;cursor:pointer;
+  }
+  #bar button:hover{color:var(--txt)}
+  #toast{
+    position:fixed;bottom:52px;left:50%;transform:translateX(-50%) translateY(12px);
+    background:#1c2a22;border:1px solid #2c4a39;color:#bfe9d2;padding:9px 15px;
+    border-radius:8px;font-size:12.5px;opacity:0;pointer-events:none;transition:.22s;z-index:20;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+
+<div id="side">
+  <div id="brand"><span class="dot"></span>nba hub<small id="count"></small></div>
+
+  <div id="datebar">
+    <button id="prev" title="previous day">&#8249;</button>
+    <div id="dateLabel">Today<span class="sub">-</span></div>
+    <button id="next" title="next day">&#8250;</button>
+  </div>
+
+  <input id="search" placeholder="filter games / channels..." autocomplete="off">
+  <div id="note"></div>
+  <div id="list"></div>
+</div>
+
+<div id="main">
+  <div id="stage">
+    <video id="v" playsinline controls></video>
+    <div id="idle">
+      <h1>pick something on the left</h1>
+      <p><b>NBA TV</b> plays right here at full quality, buffered locally.<br>
+         A <b>game</b> opens its stream in its own player window.</p>
+    </div>
+    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock" allow="autoplay; fullscreen; encrypted-media" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
+            <button id="reloadStream" style="display:none;position:absolute;top:10px;right:12px;z-index:6;background:rgba(20,22,26,.86);border:1px solid #2c3038;color:#c9cdd6;border-radius:7px;padding:6px 11px;font:12px -apple-system,Segoe UI,sans-serif;cursor:pointer;opacity:.4">&#8635; reload stream</button>
+    <div id="spinner"><div class="ring"></div><span id="spintext">working...</span></div>
+  </div>
+  <div id="bar">
+    <span class="title" id="nowTitle">nothing playing</span>
+    <span class="pill" id="pillQ" style="display:none">-</span>
+    <span class="pill" id="pillBuf" style="display:none">-</span>
+    <div class="right">
+      <button id="low" title="smaller buffer, closer to live">low delay</button>
+      <button id="freezeBtn" title="the picture just froze">frozen?</button>
+      <button id="fs">fullscreen</button>
+      <button id="reload">reload list</button>
+    </div>
+  </div>
+</div>
+
+<div id="unmute" style="display:none;position:fixed;bottom:52px;left:50%;transform:translateX(-50%);
+     background:#16281f;border:1px solid #2c4a39;color:#3ddc84;padding:10px 18px;border-radius:9px;
+     font:14px -apple-system,Segoe UI,sans-serif;cursor:pointer;z-index:30">tap for sound</div>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const v = $('#v');
+let channels = [], games = [], dates = [], curDate = '', hls = null, relayBase = '';
+let lowMode = false, lastChannel = null, srcDown = [], lastChecked = '';
+
+const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+const monNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const pad = n => String(n).padStart(2,'0');
+const toISO = d => d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate());
+const todayISO = () => toISO(new Date());
+
+function labelFor(dateISO){
+  const t = todayISO();
+  const d = new Date(dateISO + 'T12:00:00');
+  const tmr = new Date(); tmr.setDate(tmr.getDate()+1);
+  const head = dateISO === t ? 'Today' : dateISO === tmrISO() ? 'Tomorrow' : dayNames[d.getDay()];
+  const yr = d.getFullYear() !== new Date().getFullYear() ? ' ' + d.getFullYear() : '';
+  return { head, sub: monNames[d.getMonth()] + ' ' + d.getDate() + yr };
+}
+function tmrISO(){ const d = new Date(); d.setDate(d.getDate()+1); return toISO(d); }
+
+function toast(msg, ms){
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), ms || 2600);
+}
+function setSpin(on, text){
+  $('#spintext').textContent = text || 'working...';
+  $('#spinner').classList.toggle('show', !!on);
+}
+function renderDateLabel(){
+  const L = labelFor(curDate);
+  $('#dateLabel').innerHTML = L.head + '<span class="sub">' + L.sub + '</span>';
+}
+
+function row(el, opt){
+  el.className = 'row';
+  const txt = document.createElement('div'); txt.className = 'txt';
+  const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = opt.name;
+  const mt = document.createElement('div'); mt.className = 'mt'; mt.textContent = opt.meta || '';
+  txt.appendChild(nm); txt.appendChild(mt); el.appendChild(txt);
+  if (opt.badge){
+    const b = document.createElement('span');
+    b.className = 'badge ' + (opt.badgeClass || '');
+    b.textContent = opt.badge;
+    el.appendChild(b);
+  }
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.row.on').forEach(r => r.classList.remove('on'));
+    el.classList.add('on');
+    opt.onClick();
+  });
+  return el;
+}
+
+function render(){
+  const q = $('#search').value.trim().toLowerCase();
+  const list = $('#list'); list.innerHTML = '';
+
+  const gs = games.filter(g => !q || g.name.toLowerCase().includes(q));
+  const sh = document.createElement('div'); sh.className = 'sect';
+  sh.innerHTML = 'games <span class="n">' + gs.length + '</span>';
+  list.appendChild(sh);
+
+  if (srcDown.length){
+    const w = document.createElement('div'); w.className = 'note show';
+    w.style.cssText = 'margin:0 12px 8px;padding:6px 9px;border-radius:6px;background:#1d1a12;border:1px solid #3a3220;color:#c9b382;font-size:11px';
+    w.textContent = 'source down: ' + srcDown.join(', ') + ' — list may be incomplete';
+    list.appendChild(w);
+  }
+
+  if (!gs.length){
+    const e = document.createElement('div'); e.className = 'empty';
+    const nd = dates.filter(d => d > curDate)[0];
+    e.innerHTML = q ? 'nothing matches that filter.' :
+      'no games listed for this date.' + (nd ? '<br><br><a href="#" id="jump" style="color:#3ddc84">jump to ' + nd + '</a>' : '');
+    list.appendChild(e);
+    const j = e.querySelector('#jump');
+    if (j) j.addEventListener('click', ev => { ev.preventDefault(); curDate = nd; loadGames(); });
+  }
+  gs.forEach(g => {
+    const live = g.state === 'in';
+    const done = g.state === 'post';
+    let meta, badge, cls;
+    if (done) { meta = (g.time ? g.time + ' - ' : '') + 'final'; badge = 'final'; cls = ''; }
+    else if (live) { meta = 'live now'; badge = 'live'; cls = 'live'; }
+    else if (g.stream === false) { meta = (g.time ? g.time + ' - ' : '') + 'no stream listed yet'; badge = 'none'; cls = ''; }
+    else { meta = (g.time ? g.time + ' - ' : '') + 'scheduled'; badge = 'watch'; cls = ''; }
+    list.appendChild(row(document.createElement('div'), {
+      name: g.name, meta: meta, badge: badge, badgeClass: cls,
+      onClick: () => {
+        if (done) { toast('That game is over.', 2800); return; }
+        if (g.stream === false) { toast('No stream listed for this game yet.', 3000); return; }
+        watchGame(g);
+      }
+    }));
+  });
+
+  const cs = channels.filter(c => !q || c.name.toLowerCase().includes(q));
+  const sc = document.createElement('div'); sc.className = 'sect';
+  sc.innerHTML = 'nba tv <span class="n">' + cs.length + '</span>';
+  list.appendChild(sc);
+  cs.forEach(c => list.appendChild(row(document.createElement('div'), {
+    name: c.name, meta: 'live channel', badge: '1080p', badgeClass: 'hd',
+    onClick: () => playChannel(c)
+  })));
+}
+
+async function loadGames(){
+  renderDateLabel();
+  try {
+    const j = await fetch('/api/games?date=' + encodeURIComponent(curDate) + '&_=' + Date.now()).then(r => r.json());
+    games = j.games || [];
+    const src = j.sources || {};
+    srcDown = Object.keys(src).filter(k => src[k] && src[k].ok === false);
+    lastChecked = j.checked_at || '';
+    $('#count').textContent = (games.length ? games.length + ' games' : '') + (lastChecked ? ' · ' + lastChecked : '');
+  } catch(e){ games = []; }
+  render();
+}
+
+async function playChannel(c){
+  lastChannel = c;
+  setSpin(true, lowMode ? 'low-delay mode: smaller buffer...' : 'picking the best feed and buffering locally...');
+  $('#nowTitle').textContent = c.name;
+  $('#pillQ').style.display = 'none';
+  $('#pillBuf').style.display = 'none';
+  try {
+    const q = '/api/play?u=' + encodeURIComponent(c.url) + (lowMode ? '&low=1' : '');
+    const j = await fetch(q).then(r => r.json());
+    if (!j.ok) throw new Error(j.error || 'relay failed');
+    const st = j.stats || {}, variant = st.variant || {};
+    if (variant.w){
+      $('#pillQ').textContent = variant.w + 'x' + variant.h + ' @ ' + (variant.fps || '?') + 'fps';
+      $('#pillQ').className = 'pill good';
+      $('#pillQ').style.display = '';
+    }
+    attach(j.url);
+    toast('ready - buffering in the background');
+    pollStats();
+  } catch(e){
+    toast('could not start that channel: ' + e.message, 4200);
+  }
+  setSpin(false);
+}
+
+
+const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+function tryPlay(){
+  // Android WebView eats the user gesture while we await the resolve call, so
+  // an unmuted play() is always rejected there. Start muted, offer one tap.
+  if (IS_MOBILE) { v.muted = true; v.play().then(showUnmute).catch(function(){}); return; }
+  const p = v.play();
+  if (p && p.catch) {
+    p.then(hideUnmute).catch(function () {
+      v.muted = true;
+      v.play().then(showUnmute).catch(function () {});
+    });
+  }
+}
+function showUnmute(){ const u = document.getElementById('unmute'); if (u) u.style.display = 'block'; }
+function hideUnmute(){ const u = document.getElementById('unmute'); if (u) u.style.display = 'none'; }
+
+function attach(url){
+  var _pf = document.getElementById('pf'); if (_pf) _pf.style.display = 'none';
+  if (pol.timer) { clearInterval(pol.timer); pol.timer = null; pol.game = null; }
+  document.body.classList.remove('iframeMode');
+  $('#reloadStream').style.display = 'none';
+  $('#idle').style.display = 'none';
+  document.body.classList.add('playing');
+  relayBase = url.replace(/\/live\.m3u8.*$/, '');
+  if (hls){ hls.destroy(); hls = null; }
+  v.removeAttribute('src');
+  if (window.Hls && Hls.isSupported()){
+    hls = new Hls({ lowLatencyMode:false, backBufferLength:60, maxBufferLength:40 });
+    hls.loadSource(url);
+    hls.attachMedia(v);
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      const lv = hls.levels[hls.levels.length - 1];
+      if (lv && lv.width){
+        $('#pillQ').textContent = lv.width + 'x' + lv.height + ' @ ' + (Math.round(lv.frameRate) || '?') + 'fps';
+        $('#pillQ').className = 'pill good';
+        $('#pillQ').style.display = '';
+      }
+      tryPlay();
+    });
+    hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) toast('playback error: ' + d.details, 4000); });
+  } else {
+    v.src = url; tryPlay();
+  }
+}
+
+async function pollStats(){
+  for (let i = 0; i < 60; i++){
+    await new Promise(r => setTimeout(r, 1500));
+    if (!relayBase) return;
+    try {
+      const s = await fetch(relayBase + '/stats').then(r => r.json());
+      const b = $('#pillBuf');
+      b.textContent = Math.round(s.buffered_seconds) + 's buffered Â· pull ' + Math.round(s.upstream_Mbps) + ' Mbps';
+      b.style.display = '';
+    } catch(e){ return; }
+  }
+}
+
+
+// ---------- stream resilience policy ----------
+// Rules: never switch in the first 2 minutes. After that, switch only if the
+// stream is lagging AND (a) a strictly better resolution exists -> ask first,
+// or (b) it has frozen 3 times -> switch quietly.
+const pol = { start: 0, freezes: 0, curH: 0, cands: [], asked: false, game: null, timer: null };
+
+function polReset(game, curH){
+  pol.start = Date.now(); pol.freezes = 0; pol.curH = curH || 0;
+  pol.asked = false; pol.game = game; pol.cands = [];
+  if (pol.timer) clearInterval(pol.timer);
+  pol.timer = setInterval(polTick, 10000);
+  if (game) fetch('/api/candidates?u=' + encodeURIComponent(game.url))
+      .then(r => r.json()).then(j => { pol.cands = j.candidates || []; }).catch(()=>{});
+}
+
+function bestBetter(){
+  return pol.cands.filter(c => c.ok && c.frame && c.h > pol.curH)
+                 .sort((a,b) => b.h - a.h)[0] || null;
+}
+
+async function polTick(){
+  if (!pol.game) return;
+  let h = {};
+  try { h = await fetch('/api/health?u=' + encodeURIComponent(pol.game.url)).then(r => r.json()); } catch(e){ return; }
+  if (!h.ok || !h.lagging) return;              // not lagging -> leave it alone
+  const age = Date.now() - pol.start;
+  if (age < 120000) { $('#nowTitle').dataset.note = 'lagging - waiting out the 2 min grace'; return; }
+  const better = bestBetter();
+  if (better && !pol.asked) {
+    pol.asked = true;
+    const ok = window.confirm('This feed is lagging.\nA better one is available (' + better.h + 'p vs ' + (pol.curH||'?') + 'p).\n\nSwitch to it?');
+    if (ok) polSwitch(better);
+  } else if (!better && pol.freezes >= 3) {
+    const any = pol.cands.find(c => c.ok && c.frame);
+    if (any) polSwitch(any);
+  }
+}
+
+function polSwitch(c){
+  const pf = $('#pf');
+  pf.src = '/watch?u=' + encodeURIComponent(c.frame) + '&_=' + Date.now();
+  $('#nowTitle').textContent = (pol.game ? pol.game.name : '') + '  (switched)';
+  toast('switched feed', 2500);
+  polReset(pol.game, c.h);
+}
+
+async function reportFreeze(){
+  if (!pol.game) return;
+  pol.freezes++;
+  try { await fetch('/api/freeze?u=' + encodeURIComponent(pol.game.url)); } catch(e){}
+  toast('freeze ' + pol.freezes + ' of 3 logged', 2000);
+  if (pol.freezes >= 3){
+    const better = bestBetter();
+    if (better && !pol.asked){
+      pol.asked = true;
+      if (window.confirm('3 freezes on this feed.\nBetter feed available (' + better.h + 'p). Switch?')) polSwitch(better);
+    } else if (!better){
+      const any = pol.cands.find(c => c.ok && c.frame);
+      if (any) polSwitch(any);
+    }
+  }
+}
+
+let lastGame = null;
+async function watchGame(g){
+  lastGame = g;
+  setSpin(true, 'finding the feed that actually plays...');
+  $('#nowTitle').textContent = g.name;
+  $('#pillQ').style.display = 'none';
+  $('#pillBuf').style.display = 'none';
+  try {
+    const j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json());
+    if (!j.ok || !j.frame){ toast('no working feed found for this game right now', 4500); setSpin(false); return; }
+    const pf = $('#pf');
+    if (hls){ hls.destroy(); hls = null; }
+    document.body.classList.remove('playing');
+    document.body.classList.add('iframeMode');
+    pf.style.display = 'block';
+    pf.src = '/watch?u=' + encodeURIComponent(j.frame) + '&_=' + Date.now();
+    $('#reloadStream').style.display = 'block';
+    polReset(g, (j.probe || {}).h || 0);
+    const st = j.probe || {};
+    if (st.w){ $('#pillQ').textContent = st.w + 'x' + st.h + ' · playing'; $('#pillQ').className='pill good'; $('#pillQ').style.display=''; }
+    toast('feed found - ' + (st.h ? st.h + 'p' : 'live'), 3000);
+  } catch(e){ toast('could not open that game', 4000); }
+  setSpin(false);
+}
+
+function shiftDay(n){
+  $('#note').className = '';
+  const d = new Date(curDate + 'T12:00:00');
+  d.setDate(d.getDate() + n);
+  curDate = toISO(d);
+  loadGames();
+}
+$('#prev').onclick = () => shiftDay(-1);
+$('#next').onclick = () => shiftDay(1);
+$('#dateLabel').onclick = () => {
+  const pick = prompt('date (YYYY-MM-DD)', curDate);
+  if (pick && /^\d{4}-\d{2}-\d{2}$/.test(pick)){ curDate = pick; loadGames(); }
+};
+$('#search').oninput = render;
+$('#fs').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen();
+};
+$('#low').onclick = () => {
+  lowMode = !lowMode;
+  $('#low').style.color = lowMode ? 'var(--accent)' : '';
+  $('#low').style.borderColor = lowMode ? '#2c4a39' : '';
+  toast(lowMode ? 'low delay on - ~20s behind live, less cushion' : 'low delay off - bigger cushion, smoother', 3000);
+  if (lastChannel) playChannel(lastChannel);
+};
+$('#reload').onclick = () => { dates = []; boot(); };
+$('#freezeBtn').onclick = () => reportFreeze();
+document.addEventListener('DOMContentLoaded', function(){
+  const u = document.getElementById('unmute');
+  if (u) u.onclick = function(){ v.muted = false; v.play(); hideUnmute(); };
+});
+$('#reloadStream').onclick = () => {
+  const pf = $('#pf');
+  const base = pf.src.split('&_=')[0];
+  pf.src = base + '&_=' + Date.now();
+  toast('reloading stream', 1800);
+};
+
+async function boot(){
+  curDate = todayISO();
+  try {
+    const [ch, dt] = await Promise.all([
+      fetch('/api/channels?_=' + Date.now()).then(r => r.json()).catch(() => ({channels: []})),
+      fetch('/api/dates?_=' + Date.now()).then(r => r.json()).catch(() => ({dates: []}))
+    ]);
+    channels = ch.channels || [];
+    dates = dt.dates || [];
+  } catch(e){ channels = []; dates = []; }
+  const today = await fetch('/api/games?date=' + curDate + '&_=' + Date.now()).then(r => r.json()).catch(() => ({games: []}));
+  if (!(today.games || []).length){
+    const next = dates.find(d => d > curDate) || dates[dates.length - 1];
+    if (next){
+      curDate = next;
+      const n = $('#note');
+      n.className = 'show';
+      n.textContent = 'No NBA games listed today. Showing the next slate: ' + labelFor(next).sub + '.';
+    } else {
+      const n = $('#note');
+      n.className = 'show';
+      n.textContent = 'No NBA games listed right now. NBA TV below is always on.';
+    }
+  }
+  await loadGames();
+}
+boot();
+</script>
+</body>
+</html>
+

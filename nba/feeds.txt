@@ -1,0 +1,14 @@
+# ------------------------------------------------------------------
+#  feeds.txt  --  the stream list
+#
+#  Format:   NAME | URL
+#  Order matters: the first one that passes gets played, so best is on top.
+#  Anything starting with # is ignored.
+#
+#  Verified 2026-11-02 01:40 EST with play.ps1 -Check
+# ------------------------------------------------------------------
+
+NBA TV 1080p60  -- main                       | http://23.237.104.106:8080/USA_NBA/index.m3u8
+NBA TV 1080p    -- Akamai FAST                | https://pb-5pdyic0cu7tri.akamaized.net/NBA.m3u8
+NBA TV 1080p    -- Fire TV / Amagi             | https://amg00556-amg00556c3-firetv-us-6060.playouts.now.amagi.tv/playlist.m3u8
+NBA TV 1080p    -- backup relay (slower)       | http://38b891c9.rossteleccom.net/iptv/SQNLRPBE7FFE8V/7226/index.m3u8
