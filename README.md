@@ -189,6 +189,21 @@ that cost the most time:
 - The PC has to stay reachable: ports `8790` and `8900-8959`. If a network is "guest /
   client-isolated", no rule helps.
 
+## Deploying to the live install
+
+The repo folder and the folder that actually serves the phone are different, and fixing a bug
+in one while the phone talks to the other has cost real time. After any change:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\deploy.ps1
+#   -Live "D:\nba"   -Port 8790   -BindHost 0.0.0.0
+```
+
+It copies the **runtime** files only (never `browserprofile/`, `appprofile/`, logs), backs up
+what it overwrites as `*.bak-<timestamp>`, stops the old hub and its relays, starts the new one
+**detached from the calling shell**, and does not return until `/api/ping` answers — then prints
+every LAN URL to type on the phone, with its adapter name.
+
 ## Layout
 
 ```text
@@ -196,10 +211,12 @@ nba/            hub, relay, probes, CLI launchers, feeds.txt
   hub/          server, UI, hls.min.js, probes, NBAHUB.bat, FIREWALL.bat,
                 NBAHub.exe (the PC app, built by pc/build-pc.ps1)
 pc/             NBAPC.cs (the launcher), build-pc.ps1, app.ico
+tools/          deploy.ps1 (repo -> live install, restart, verify)
 android/        manifest, MainActivity.java, res/, build.ps1
-releases/       NBAHub.apk (signed, 25 KB)
-docs/           screenshots + the scripts used to verify them:
-                cdp.py (drive the phone's WebView over CDP), desktop_check.py,
-                stats_check.py (relay → stat pill), page_dump.py (what a stream
-                page is doing right now)
+releases/       NBAHub.apk (signed, 25 KB); the portable bundle is a release asset
+docs/           screenshots + the scripts that produced them: cdp.py (drive the
+                phone's WebView over CDP), desktop_check.py, stats_check.py
+                (relay -> stat pill), lag_check.py / phone_lag_check.py
+                (click-to-frame + seconds behind live), fs_hub_check.py
+                (fullscreen aspect), page_dump.py (what a stream page is doing)
 ```
