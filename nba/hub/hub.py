@@ -991,6 +991,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._send(200, json.dumps({"dates": [], "error": str(exc)}))
 
+        if u.path == "/api/next":
+            # "no games on this date" needs a way out: holidays exist (Nov 26 is
+            # Thanksgiving, ESPN really returns 0 events), so point at the next
+            # night that does have games instead of leaving the user at a dead end
+            date = (qs.get("date") or [""])[0] or time.strftime("%Y-%m-%d")
+            step = -1 if (qs.get("dir") or ["next"])[0] == "prev" else 1
+            try:
+                import datetime as _dt
+                d = _dt.date.fromisoformat(date)
+                tried = []
+                for _ in range(20):
+                    d = d + _dt.timedelta(days=step)
+                    iso = d.isoformat()
+                    tried.append(iso)
+                    n = len(games_for(iso))
+                    if n:
+                        return self._send(200, json.dumps({"date": iso, "games": n,
+                                                           "tried": tried}))
+                return self._send(200, json.dumps({"date": None, "tried": tried}))
+            except Exception as exc:
+                return self._send(200, json.dumps({"date": None, "error": str(exc)}))
+
         if u.path == "/api/channels":
             return self._send(200, json.dumps({"channels": channels()}))
 

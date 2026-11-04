@@ -258,6 +258,7 @@ const IN_APP = /NBAHubApp/.test(navigator.userAgent);
 const CAN_DRM = (typeof navigator.requestMediaKeySystemAccess === 'function') && window.isSecureContext;
 const APP = { diag: null };              // optional native bridge (Hub.isApp)
 let channels = [], games = [], dates = [], curDate = '', hls = null, relayBase = '', relayPort = 0;
+let season = null;   // {start, end}: the schedule is known this far, so an empty day is real
 let lowMode = false, lastChannel = null, srcDown = [], lastChecked = '';
 const DATE_KEY = 'nbahub.date';
 
@@ -328,11 +329,27 @@ function render(){
   if (!gs.length){
     const e = document.createElement('div'); e.className = 'empty';
     const nd = dates.filter(d => d > curDate)[0];
-    e.innerHTML = q ? 'nothing matches that filter.' :
-      'no games scheduled for this date.' + (nd ? '<br><br><a href="#" id="jump" style="color:#3ddc84">jump to ' + nd + '</a>' : '');
+    const span = season ? 'the schedule is known through ' + season.end + ', so this night really is empty' : '';
+    e.innerHTML = q ? 'nothing matches that filter.'
+      : 'no NBA games on this date.' + (span ? '<br><span style="color:#6b7280">' + span + '</span>' : '') +
+        '<div id="nxt" style="margin-top:10px;color:#6b7280">looking for the next slate...</div>' +
+        (nd ? '<div style="margin-top:8px"><a href="#" id="jump" style="color:#3ddc84">jump to ' + nd + '</a></div>' : '');
     list.appendChild(e);
     const j = e.querySelector('#jump');
     if (j) j.addEventListener('click', ev => { ev.preventDefault(); curDate = nd; loadGames(); });
+    // an empty night is usually a holiday (Thanksgiving), so offer the next one
+    if (!q) fetch('/api/next?date=' + encodeURIComponent(curDate) + '&_=' + Date.now())
+      .then(r => r.json())
+      .then(nx => {
+        const el = e.querySelector('#nxt');
+        if (!el) return;
+        if (nx && nx.date){
+          el.innerHTML = '<a href="#" id="jump2" style="color:#3ddc84">next games: ' + nx.date + ' (' + nx.games + ')</a>';
+          const a = e.querySelector('#jump2');
+          if (a) a.addEventListener('click', ev => { ev.preventDefault(); curDate = nx.date; loadGames(); });
+        } else { el.textContent = ''; }
+      })
+      .catch(() => { const el = e.querySelector('#nxt'); if (el) el.textContent = ''; });
   } else if (gs.every(g => g.stream === false) && !q){
     // the fixture list comes from the league schedule (2 weeks out), the stream
     // sites only post a few days ahead -- say so instead of looking broken
@@ -834,6 +851,7 @@ async function boot(){
     ]);
     channels = ch.channels || [];
     dates = dt.dates || [];
+    if (dt.season && dt.season.start && dt.season.end) season = dt.season;
   } catch(e){ channels = []; dates = []; }
 
   let today = { games: [] };
