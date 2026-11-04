@@ -20,6 +20,8 @@ using System.Drawing;
 using System.IO;
 using System.Management;
 using System.Net;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -51,8 +53,10 @@ static class Program
             {
                 if (!mine)
                 {
-                    // already running: just raise another app window at the live port
-                    Log("another instance is running, reusing it");
+                    // already running: bring THAT window forward instead of stacking
+                    // another identical app window every time the icon is clicked
+                    Log("another instance is running");
+                    if (FocusExistingWindow()) { Log("focused the existing window"); return 0; }
                     int live = ReadPortFile();
                     if (live > 0 && Ping(live, 1500)) OpenWindow(opt, live, false);
                     else MessageBox.Show("nba hub is already starting. Close this dialog and wait for its window.",
@@ -75,6 +79,13 @@ static class Program
     {
         Log("start exe=" + Application.ExecutablePath + " hubDir=" + opt.HubDir + " port=" + opt.Port +
             " local=" + opt.LocalOnly);
+        // A window is already on screen (an earlier launcher may have exited while
+        // the browser kept running): focus it rather than open a second one.
+        if (FocusExistingWindow())
+        {
+            Log("window already open, focused it");
+            return 0;
+        }
         string hubDir = opt.HubDir;
         string hubPy = Path.Combine(hubDir, "hub.py");
         if (!File.Exists(hubPy))
@@ -341,6 +352,67 @@ static class Program
         {
             Log("browser start failed: " + e.Message);
             return null;
+        }
+    }
+
+    // ------------------------------------------------------- existing window
+
+    delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr hWnd, StringBuilder s, int max);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int cmd);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hWnd);
+
+    /// <summary>
+    /// Find our app window (a browser showing the hub page) and bring it forward.
+    /// Without this every click on the icon opened yet another identical window,
+    /// because each launch is a new process that never knew about the old one.
+    /// </summary>
+    static bool FocusExistingWindow()
+    {
+        IntPtr found = IntPtr.Zero;
+        try
+        {
+            EnumWindows(delegate(IntPtr h, IntPtr l)
+            {
+                if (!IsWindowVisible(h)) return true;
+                var sb = new StringBuilder(512);
+                GetWindowText(h, sb, sb.Capacity);
+                string title = sb.ToString();
+                if (title.IndexOf("nba hub", StringComparison.OrdinalIgnoreCase) < 0) return true;
+                uint pid;
+                GetWindowThreadProcessId(h, out pid);
+                try
+                {
+                    string name = Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
+                    if (name != "chrome" && name != "msedge" && name != "firefox" && name != "brave") return true;
+                }
+                catch { return true; }
+                found = h;
+                return false;                 // stop enumerating
+            }, IntPtr.Zero);
+        }
+        catch (Exception e)
+        {
+            Log("window scan failed: " + e.Message);
+            return false;
+        }
+        if (found == IntPtr.Zero) return false;
+        try
+        {
+            if (IsIconic(found)) ShowWindow(found, 9);   // SW_RESTORE
+            else ShowWindow(found, 5);                   // SW_SHOW
+            SetForegroundWindow(found);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Log("focus failed: " + e.Message);
+            return false;
         }
     }
 

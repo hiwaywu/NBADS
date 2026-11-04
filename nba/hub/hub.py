@@ -439,8 +439,54 @@ def all_games():
     return games
 
 
+DAY_CACHE = {}
+DAY_TTL = 600
+
+
+def day_rows(date):
+    """ESPN fixtures for one exact day, fetched on demand.
+
+    The warm window (schedule_window) covers today -3..+10 so the common case is
+    instant, but the league schedule runs all season. Walking further with the
+    date arrow used to end at the window edge and look like the schedule simply
+    stopped; now any date in the season is one small request away, cached.
+    """
+    hit = DAY_CACHE.get(date)
+    if hit and time.time() - hit[0] < DAY_TTL:
+        return hit[1]
+    try:
+        import datetime as _dt
+        ymd = _dt.date.fromisoformat(date).strftime("%Y%m%d")
+    except Exception:
+        return []
+    rows = _safe_espn_day(ymd)
+    if len(DAY_CACHE) > 240:                     # walking the season all night
+        for k in sorted(DAY_CACHE, key=lambda k: DAY_CACHE[k][0])[:80]:
+            DAY_CACHE.pop(k, None)
+    DAY_CACHE[date] = (time.time(), rows)
+    return rows
+
+
+def _fixture(r):
+    return {
+        "name": f"{r['away']} vs {r['home']}",
+        "url": "",
+        "date": r["date"],
+        "time": local_time(r["start_utc"]),
+        "utc": r.get("start_utc", ""),
+        "state": r.get("state", ""),
+        "detail": r.get("detail", ""),
+        "src": "espn",
+        "verified": True,
+        "stream": False,
+    }
+
+
 def games_for(date):
     gs = [g for g in all_games() if g["date"] == date]
+    if not gs:
+        # outside the warm window: ask ESPN about that day directly
+        gs = [_fixture(r) for r in day_rows(date) if r.get("date") == date]
     gs.sort(key=lambda g: (g.get("utc") or "9999", g["name"]))
     return gs
 
@@ -926,14 +972,22 @@ class Handler(BaseHTTPRequestHandler):
                     if r.get("date"):
                         ds.add(r["date"])
                 # how many of that day's games actually have a stream listed:
-                # the sources post ~4 days ahead, the schedule is known further out
+                # the sources post a couple of days ahead, the schedule is known
+                # for the whole season
                 streams = {}
                 for g in gs:
                     if g.get("stream"):
                         streams[g["date"]] = streams.get(g["date"], 0) + 1
-                return self._send(200, json.dumps({"dates": sorted(ds),
-                                                   "streams": streams,
-                                                   "today": time.strftime("%Y-%m-%d")}))
+                import datetime as _dt
+                t = _dt.date.today()
+                sy = t.year if t.month >= 9 else t.year - 1
+                return self._send(200, json.dumps({
+                    "dates": sorted(ds),
+                    "streams": streams,
+                    "today": t.isoformat(),
+                    "season": {"start": _dt.date(sy, 10, 1).isoformat(),
+                               "end": _dt.date(sy + 1, 4, 30).isoformat()},
+                }))
             except Exception as exc:
                 return self._send(200, json.dumps({"dates": [], "error": str(exc)}))
 
