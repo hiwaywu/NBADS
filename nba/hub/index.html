@@ -235,6 +235,7 @@
     <span class="pill" id="pillBuf" style="display:none">-</span>
     <span class="pill" id="pillLat" style="display:none" title="seconds behind the live edge">-</span>
     <div class="right">
+      <button id="live" title="jump back to the live edge">live</button>
       <button id="low" title="smaller buffer, closer to live">low delay</button>
       <button id="freezeBtn" title="the picture just froze">frozen?</button>
       <button id="fs">fullscreen</button>
@@ -443,6 +444,7 @@ async function playChannel(c, byMirror){
 // 15 s, and only while the channel list has an untried entry. A manual click
 // resets the whole thing, so it never fights the user.
 let mirrorIdx = -1, mirrorTried = new Set(), mirrorLastSwitch = 0;
+let seekGraceUntil = 0;
 let mirrorReason = '', mirrorStalls = [];
 let mirrorLastT = -1, mirrorLastMove = Date.now();
 
@@ -471,10 +473,15 @@ function mirrorFail(reason){
 
 setInterval(() => {
   if (!hls || !v || v.paused || !lastChannel) return;
+  // a seek is not a stall: buffering the target position takes seconds, and
+  // treating that as failure used to rotate mirrors (and wipe the DVR) mid-seek
+  if (v.seeking || Date.now() < seekGraceUntil) return;
   const now = Date.now();
   const t = v.currentTime;
   if (t !== mirrorLastT) { mirrorLastT = t; mirrorLastMove = now; return; }
-  if (now - mirrorLastMove > 4000 && v.readyState < 3){
+  const frozen = now - mirrorLastMove;
+  const limit = dvrHold ? 15000 : 4000;     // deliberately behind: allow a slow seek to land
+  if (frozen > limit && v.readyState < 3){
     mirrorFail('picture stalled');
   }
 }, 1000);
@@ -591,7 +598,7 @@ async function pollStats(){  for (let i = 0; i < 80; i++){
     }
     if (s && typeof s.buffered_seconds === 'number'){
       const b = $('#pillBuf');
-      b.textContent = Math.round(s.buffered_seconds) + 's buffered \u00b7 pull ' + Math.round(s.upstream_Mbps) + ' Mbps';
+      b.textContent = Math.round(s.buffered_seconds) + 's buffered' + (s.dvr_seconds_stored ? ' \u00b7 ' + Math.round(s.dvr_seconds_stored/60*10)/10 + ' min stored' : '') + ' \u00b7 pull ' + Math.round(s.upstream_Mbps) + ' Mbps';
       b.style.display = '';
     }
     // a single-rendition feed carries no RESOLUTION attribute, so the relay has
@@ -621,15 +628,90 @@ setInterval(() => {
 
 // Hard ceiling: for live sport a jump is better than watching the past. If the
 // edge ran away (upstream hiccup, tab in background), snap back to the target.
+// Pausing is the exception: that is the viewer asking to sit behind, so the ring
+// is grown instead (see dvrWindow) and the ceiling only fires past the ring.
 setInterval(() => {
   if (!hls || !lastChannel) return;
   const target = lowMode ? DELAY.low : DELAY.normal;
   const lat = hls.latency;
   if (typeof lat !== 'number' || !isFinite(lat)) return;
-  if (lat > target * 6 + 4 && typeof hls.liveSyncPosition === 'number'){
+  const ceiling = dvrHold ? Math.max(target * 6 + 4, dvrSeconds - 12) : target * 6 + 4;
+  if (lat > ceiling && typeof hls.liveSyncPosition === 'number'){
     try { v.currentTime = hls.liveSyncPosition; } catch(e){}
   }
 }, 5000);
+
+// ---------------------------------------------------------------- pause = DVR
+// "Pause, keep downloading, come back behind live" only works if the paused
+// position still exists when playback resumes. The relay keeps a RAM ring plus a
+// disk tier (deleted when it stops), so rewinding and long pauses are served
+// from what was already downloaded instead of racing the source. While the
+// viewer is deliberately behind, the snap-to-live ceiling is relaxed; "live"
+// gives the delay back.
+let dvrHold = false, dvrSeconds = 0, dvrMB = 0;
+
+function dvrWindow(n){
+  if (!relayBase) return;
+  fetch(relayBase + '/window?n=' + n + '&_=' + Date.now())
+    .then(r => r.json())
+    .then(j => { dvrSeconds = j.buffered_seconds || dvrSeconds; })
+    .catch(() => {});
+}
+
+function seekRel(delta){
+  if (!hls){ toast('nothing playing yet', 1800); return; }
+  // The relay keeps RAM + disk, so hls can fetch behind the playhead from the
+  // playlist; the only real limit is how much is stored, not what is buffered.
+  const edge = (typeof hls.liveSyncPosition === 'number') ? hls.liveSyncPosition : v.currentTime;
+  const stored = dvrSeconds || (lowMode ? 35 : 70);
+  const oldest = Math.max(0, edge - stored + 4);
+  const end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : edge;
+  let t = v.currentTime + delta;
+  if (t < oldest){
+    t = oldest;
+    toast('only ' + Math.round(stored / 60) + ' min is stored - going to the oldest kept second', 3200);
+  }
+  if (delta > 0 && t > end - 1.0) t = end - 1.0;
+  seekGraceUntil = Date.now() + 20000;
+  dvrHold = true;
+  dvrWindow(20);
+  v.currentTime = t;
+  toast((delta < 0 ? 'rewound ' + Math.abs(delta) : 'forward ' + delta) + 's', 1600);
+}
+
+function seekLive(){
+  if (!hls || typeof hls.liveSyncPosition !== 'number') return;
+  dvrHold = false;
+  dvrWindow(lowMode ? 5 : 10);
+  try { v.currentTime = hls.liveSyncPosition; v.play(); } catch(e){}
+  toast('back to live', 1800);
+}
+
+v.addEventListener('pause', () => {
+  dvrHold = true;
+  dvrWindow(20);                       // keep the ring while the picture is still
+});
+
+v.addEventListener('play', () => {
+  if (!dvrHold) dvrWindow(lowMode ? 5 : 10);
+});
+
+setInterval(() => {
+  // caught up on its own? stop holding extra history
+  if (dvrHold && hls && typeof hls.latency === 'number' && hls.latency < (lowMode ? DELAY.low : DELAY.normal) * 2){
+    dvrHold = false;
+    dvrWindow(lowMode ? 5 : 10);
+  }
+}, 5000);
+
+// click the "N s behind live" pill to give up the delay and go to the edge
+document.addEventListener('click', ev => {
+  const p = ev.target;
+  if (p && p.id === 'pillLat' && hls && typeof hls.liveSyncPosition === 'number'){
+    try { v.currentTime = hls.liveSyncPosition; v.play(); } catch(e){}
+    toast('jumped to live', 2000);
+  }
+});
 
 // ---------- stream resilience policy (games, desktop frame) ----------
 const pol = { start: 0, freezes: 0, curH: 0, cands: [], asked: false, game: null, timer: null };
@@ -811,6 +893,7 @@ $('#low').onclick = () => {
   if (lastChannel) playChannel(lastChannel);
 };
 $('#reload').onclick = () => { dates = []; boot(); };$('#freezeBtn').onclick = () => reportFreeze();
+$('#live').onclick = () => seekLive();
 $('#unmute').onclick = function(){ v.muted = false; v.play().catch(()=>{}); hideUnmute(); };
 $('#reloadStream').onclick = () => {
   const pf = $('#pf');

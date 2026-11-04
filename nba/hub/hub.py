@@ -818,12 +818,39 @@ def stop_relay(url):
         item = RELAYS.pop(url, None)
     if not item:
         return
-    proc, _port = item
+    proc, port = item
     try:
         if proc.poll() is None:
             proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
     except Exception:
         pass
+    # terminate() does not run the child's cleanup, so the download-ahead folder
+    # is removed here: "kept while you watch, gone when you stop" has to hold
+    # even when the relay is killed.
+    dvr = os.path.join(NBA_DIR, "dvr", str(port))
+    shutil.rmtree(dvr, ignore_errors=True)
+
+
+def sweep_dvr():
+    """Remove DVR folders left behind by a crash or a previous session."""
+    root = os.path.join(NBA_DIR, "dvr")
+    if not os.path.isdir(root):
+        return
+    live = {str(p) for (_proc, p) in list(RELAYS.values())}
+    for name in os.listdir(root):
+        path = os.path.join(root, name)
+        if not os.path.isdir(path):
+            continue
+        if name in live:
+            continue
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
 
 
 def _stop_everything():
@@ -858,9 +885,15 @@ def start_relay(url, low=False):
             stop_relay(other)
     window = "5" if low else "10"
     prefetch = "3" if low else "6"
+    # download-ahead tier: keeps the minutes the RAM ring drops, so pausing or
+    # rewinding does not depend on the source still having them. Wiped when the
+    # relay exits, and swept on start if a previous run died.
+    dvr_dir = os.path.join(NBA_DIR, "dvr", str(port))
+    dvr_min = os.environ.get("NBAHUB_DVR_MIN", "15" if not low else "8")
     cmd = [find_python(), RELAY, "--url", url, "--port", str(port),
            "--host", RELAY_HOST,
-           "--window", window, "--prefetch", prefetch, "--idle-timeout", "900"]
+           "--window", window, "--prefetch", prefetch, "--idle-timeout", "900",
+           "--dvr", dvr_dir, "--dvr-minutes", dvr_min]
     creation = 0x08000000  # CREATE_NO_WINDOW
     proc = subprocess.Popen(cmd, cwd=NBA_DIR, creationflags=creation,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -23,7 +23,9 @@ and, if still bad, skipped instead of freezing playback.
 import argparse
 import json
 import math
+import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -148,7 +150,8 @@ def parse_media(text):
 # relay core
 # --------------------------------------------------------------------------- #
 class Relay:
-    def __init__(self, url, window=12, prefetch=4, max_seconds=None, idle_timeout=180):
+    def __init__(self, url, window=12, prefetch=4, max_seconds=None, idle_timeout=180,
+                 dvr_dir=None, dvr_minutes=15, dvr_max_mb=1200):
         self.last_hit = time.time()
         self.idle_timeout = idle_timeout
         self.sess = make_session()
@@ -177,6 +180,16 @@ class Relay:
         self.seg_hits = 0
         self.miss = 0
         self.variant_info = {}
+        # ---- disk tier: keep what scrolled out of the RAM ring, delete on exit
+        # The RAM ring is ~70 s. Anything older is moved to disk instead of being
+        # dropped, up to dvr_minutes / dvr_max_mb, so pausing or rewinding does
+        # not have to fight the source. The folder is removed when the relay
+        # stops (and stale ones are swept on start), so nothing accumulates.
+        self.dvr_dir = dvr_dir
+        self.dvr_minutes = dvr_minutes or 15
+        self.dvr_max_mb = dvr_max_mb or 1200
+        self.disk = OrderedDict()          # seq -> (path, bytes)
+        self.dvr_mb = 0.0
 
     # ---- resolve master -> best rendition ----
     def resolve(self):
@@ -239,9 +252,10 @@ class Relay:
                             self.bytes_total += len(data)
                             self.segs_total += 1
                             while len(self.segs) > self.window:
-                                old, _ = self.segs.popitem(last=False)
-                                self.durs.pop(old, None)
-                                self.uris.pop(old, None)
+                                old, old_data = self.segs.popitem(last=False)
+                                # disk tier: keep what leaves RAM so rewind and a
+                                # long pause still have the source
+                                self._spill(old, old_data)
                         total += len(data)
                         # ready as soon as the edge segment is in RAM (2 as a floor)
                         if newest is not None and seq == newest and len(self.segs) >= 2:
@@ -284,11 +298,68 @@ class Relay:
         raise last
 
     # ---- what the player sees ----
+    def _spill(self, seq, data):
+        """Move a segment that left the RAM ring to disk (called under self.lock)."""
+        if not self.dvr_dir:
+            self.durs.pop(seq, None)
+            self.uris.pop(seq, None)
+            return
+        try:
+            os.makedirs(self.dvr_dir, exist_ok=True)
+            path = os.path.join(self.dvr_dir, "seg-%06d.ts" % seq)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            self.disk[seq] = (path, len(data))
+            self.dvr_mb += len(data) / 1e6
+        except Exception as e:
+            self.last_error = "dvr write: %s" % e
+        # prune: by bytes, then by age (dvr_minutes)
+        while self.disk and self.dvr_mb > self.dvr_max_mb:
+            self._drop_oldest_disk()
+        if self.disk and self.target:
+            keep = int(self.dvr_minutes * 60 / max(self.target, 1.0))
+            while len(self.disk) > keep:
+                self._drop_oldest_disk()
+
+    def _drop_oldest_disk(self):
+        old, (path, size) = self.disk.popitem(last=False)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self.dvr_mb -= size / 1e6
+        self.durs.pop(old, None)
+        self.uris.pop(old, None)
+
+    def _disk_path(self, seq):
+        with self.lock:
+            item = self.disk.get(seq)
+        return item[0] if item else None
+
+    def wipe_dvr(self):
+        """Delete the DVR folder: the download-ahead stays only while it is useful."""
+        with self.lock:
+            paths = [p for (p, _s) in self.disk.values()]
+            self.disk.clear()
+            self.dvr_mb = 0.0
+        for p in paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        if self.dvr_dir:
+            try:
+                shutil.rmtree(self.dvr_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     def playlist_text(self):
         with self.lock:
-            seqs = sorted(self.segs.keys())
+            seqs = sorted(set(self.segs.keys()) | set(self.disk.keys()))
         if len(seqs) > self.window:
-            seqs = seqs[-self.window:]
+            # live window plus whatever the disk still holds (that is the point
+            # of the DVR: the player may seek back into it)
+            pass
         if not seqs:
             return None
         first = seqs[0]
@@ -307,16 +378,28 @@ class Relay:
             d = self.segs.get(seq)
         if d is not None:
             return d
+        path = self._disk_path(seq)
+        if path:
+            try:
+                with open(path, "rb") as fh:
+                    return fh.read()
+            except OSError:
+                pass
         return self.grab(seq)
 
     def stats(self):
         with self.lock:
             n = len(self.segs)
             b = sum(len(v) for v in self.segs.values())
+            dn, dmb = len(self.disk), self.dvr_mb
         return {
             "segments_cached": n,
             "buffered_MB": round(b / 1e6, 2),
             "buffered_seconds": round(n * self.target, 1),
+            "dvr_segments": dn,
+            "dvr_MB": round(dmb, 1),
+            "dvr_minutes_cap": self.dvr_minutes,
+            "dvr_seconds_stored": round((n + dn) * self.target, 1),
             "upstream_Mbps": round(self.throughput / 1e6, 2),
             "variant": self.variant_info,
             "source": self.source_url,
@@ -391,6 +474,20 @@ def make_handler(relay):
             if path == "/stats":
                 return self._send(200, json.dumps(relay.stats(), indent=2),
                                   "application/json")
+            if path == "/window":
+                # grow the ring while the viewer is paused, shrink it on resume.
+                # This is what makes "pause, come back behind live" work: the
+                # paused position has to still exist in the ring when playback
+                # resumes, otherwise the player is forced back to the edge.
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                want = (qs.get("n") or [""])[0]
+                if want.isdigit():
+                    with relay.lock:
+                        relay.window = max(2, min(60, int(want)))
+                return self._send(200, json.dumps({"window": relay.window,
+                                                   "segments": len(relay.segs),
+                                                   "buffered_seconds": round(len(relay.segs) * relay.target, 1)}),
+                                  "application/json")
             if path == "/source":
                 return self._send(200, relay.url + "\n")
             if path == "/init.mp4" and relay.map_data:
@@ -423,10 +520,18 @@ def main():
                     help="resolve best rendition, measure throughput, exit")
     ap.add_argument("--idle-timeout", type=int, default=180,
                     help="exit after N seconds with no player requests")
+    ap.add_argument("--dvr", default=None,
+                    help="folder for the download-ahead tier (deleted when the relay stops)")
+    ap.add_argument("--dvr-minutes", type=int, default=15,
+                    help="how many minutes of the stream to keep on disk")
+    ap.add_argument("--dvr-max-mb", type=int, default=1200,
+                    help="hard byte cap for the DVR folder")
     args = ap.parse_args()
 
     relay = Relay(args.url, window=args.window, prefetch=args.prefetch,
-                  max_seconds=args.max_seconds, idle_timeout=args.idle_timeout)
+                  max_seconds=args.max_seconds, idle_timeout=args.idle_timeout,
+                  dvr_dir=args.dvr, dvr_minutes=args.dvr_minutes,
+                  dvr_max_mb=args.dvr_max_mb)
     try:
         relay.resolve()
     except Exception as e:
@@ -483,6 +588,7 @@ def main():
         pass
     finally:
         relay.stop.set()
+        relay.wipe_dvr()          # nothing lingers after the app is closed
     return 0
 
 
