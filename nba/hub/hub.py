@@ -186,11 +186,34 @@ def request_hostname(handler, default=""):
     return default or lan_ip() or "127.0.0.1"
 
 
+def port_in_use(p):
+    """Something already answers on this port?
+
+    A bind() test is not enough on Windows: HTTPServer sets SO_REUSEADDR, so a
+    second process can bind a port another one is serving on, and then whatever
+    we start answers... nothing, while /health talks to the stranger. That is how
+    a dead stream briefly "worked" by playing somebody else's relay.
+    """
+    s = socket.socket()
+    s.settimeout(0.2)
+    try:
+        s.connect(("127.0.0.1", p))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def free_port(start=8900, end=8960):
+    with RELAY_LOCK:
+        busy = {p for (_proc, p) in RELAYS.values()}
     for p in range(start, end):
+        if p in busy or port_in_use(p):
+            continue
         s = socket.socket()
         try:
-            s.bind(("127.0.0.1", p))
+            s.bind(("0.0.0.0", p))       # same address the relay will bind
             return p
         except OSError:
             continue
@@ -852,6 +875,11 @@ def start_relay(url, low=False):
             return 0
         try:
             r = fetch(f"http://127.0.0.1:{port}/health", timeout=2)
+            if r.status == 200 and not relay_is_ours(port, url):
+                # another relay owns this port and the page would play IT
+                LogRelay("port %d belongs to a different relay, refusing" % port)
+                proc.terminate()
+                return 0
             return port if r.status in (200, 503) else port
         except urllib.error.HTTPError as exc:
             if exc.code == 503:          # warming: the socket is up, that is enough
@@ -860,6 +888,22 @@ def start_relay(url, low=False):
             pass
         time.sleep(0.2)
     return 0
+
+
+def relay_is_ours(port, url):
+    """Identity check: the relay on `port` must be serving `url`."""
+    try:
+        st = json.loads(fetch(f"http://127.0.0.1:{port}/stats", timeout=2).read())
+    except Exception:
+        return True                      # cannot tell; do not break a working start
+    src = (st.get("source") or st.get("url") or "").strip()
+    if not src:
+        return True
+    return src == url
+
+
+def LogRelay(msg):
+    print(f"[hub] {msg}", flush=True)
 
 
 # ------------------------------------------------------------------ server

@@ -401,10 +401,13 @@ async function loadGames(){
   render();
 }
 
-async function playChannel(c){
+async function playChannel(c, byMirror){
   lastChannel = c;
+  const idx = channels.findIndex(x => x.url === c.url);
+  if (!byMirror) { mirrorTried.clear(); mirrorReason = ''; }
+  if (idx >= 0) mirrorIdx = idx;
   setSpin(true, lowMode ? 'low-delay mode: smaller buffer...' : 'picking the best feed and buffering locally...');
-  $('#nowTitle').textContent = c.name;
+  $('#nowTitle').textContent = c.name + mirrorTag();
   $('#pillQ').style.display = 'none';
   $('#pillBuf').style.display = 'none';
   try {
@@ -424,7 +427,62 @@ async function playChannel(c){
   } catch(e){
     toast('could not start that channel: ' + e.message, 4200);
     setSpin(false);
+    // a dead mirror is also a reason to move on, not just to sit there
+    if (!byMirror) return mirrorFail('could not start: ' + e.message);
   }
+}
+
+// ---------------------------------------------------------- mirror failover
+// Channels are mirrors of the same thing (main / Akamai / Amagi / backup). We
+// own the player here, so a broken mirror is observable instead of guessed:
+//   - no progress: currentTime frozen for 4 s while not paused / seeking
+//   - waiting/stalled events piling up (3 in 60 s)
+//   - an hls fatal error that the retry pass did not fix
+//   - the relay refusing to start at all
+// On any of those, hop to the next mirror that has not been tried yet, once per
+// 15 s, and only while the channel list has an untried entry. A manual click
+// resets the whole thing, so it never fights the user.
+let mirrorIdx = -1, mirrorTried = new Set(), mirrorLastSwitch = 0;
+let mirrorReason = '', mirrorStalls = [];
+let mirrorLastT = -1, mirrorLastMove = Date.now();
+
+function mirrorTag(){
+  const n = mirrorTried.size;
+  return n ? '  (mirror ' + (mirrorIdx + 1) + '/' + channels.length + ')' : '';
+}
+
+function mirrorFail(reason){
+  if (!channels.length) return false;
+  const now = Date.now();
+  if (now - mirrorLastSwitch < 15000) return false;        // no ping-pong
+  mirrorLastSwitch = now;
+  if (lastChannel) mirrorTried.add(lastChannel.url);
+  mirrorReason = reason;
+  for (let step = 1; step <= channels.length; step++){
+    const i = (mirrorIdx + step) % channels.length;
+    if (mirrorTried.has(channels[i].url)) continue;
+    toast(reason + ' - trying ' + channels[i].name, 3200);
+    playChannel(channels[i], true);
+    return true;
+  }
+  toast('every mirror failed (' + reason + ') - pick one manually', 5000);
+  return false;
+}
+
+setInterval(() => {
+  if (!hls || !v || v.paused || !lastChannel) return;
+  const now = Date.now();
+  const t = v.currentTime;
+  if (t !== mirrorLastT) { mirrorLastT = t; mirrorLastMove = now; return; }
+  if (now - mirrorLastMove > 4000 && v.readyState < 3){
+    mirrorFail('picture stalled');
+  }
+}, 1000);
+
+function noteStall(){
+  mirrorStalls.push(Date.now());
+  mirrorStalls = mirrorStalls.filter(t => Date.now() - t < 60000);
+  if (mirrorStalls.length >= 3) { mirrorStalls = []; mirrorFail('repeated buffering'); }
 }
 
 function tryPlay(){
@@ -450,7 +508,7 @@ function hideUnmute(){ const u = $('#unmute'); if (u) u.style.display = 'none'; 
 // 6 s segments, so 2 => ~12 s behind live, 1.25 => ~7.5 s (crisper, less slack)
 const DELAY = { normal: 2, low: 1.25 };
 let stallCount = 0;
-v.addEventListener('waiting', () => { stallCount++; });
+v.addEventListener('waiting', () => { stallCount++; noteStall(); });
 
 function hlsConfig(){
   const target = lowMode ? DELAY.low : DELAY.normal;
@@ -511,7 +569,9 @@ function attach(url){
       setSpin(false);
       toast('playback error: ' + d.details, 4000);
       // one automatic retry: relays drop the first connection after a cold start
-      if (!attach._retried){ attach._retried = true; setTimeout(() => attach(url), 1500); }
+      if (!attach._retried){ attach._retried = true; setTimeout(() => attach(url), 1500); return; }
+      // the retry did not save it -- this mirror is done
+      mirrorFail('feed error: ' + d.details);
     });
     attach._retried = false;
   } else if (v.canPlayType('application/vnd.apple.mpegurl')){
@@ -817,6 +877,8 @@ async function diag(){
       add('latency', (typeof hls.latency === 'number' ? hls.latency.toFixed(2) : '?') + ' s behind live');
       add('buffer', 'hls ' + (hls.mainForwardBufferInfo ? hls.mainForwardBufferInfo().len.toFixed(1) : '?') + ' s ahead');
       add('stalls', stallCount + ' (video waiting events since page load)');
+      add('mirror', (mirrorIdx + 1) + '/' + channels.length +
+          '  tried ' + mirrorTried.size + (mirrorReason ? '  last fail: ' + mirrorReason : ''));
       add('delay target', (lowMode ? DELAY.low : DELAY.normal) + ' x ' + hls.targetLatency + 's');
     } catch(e){ add('hls stats', String(e)); }
   }

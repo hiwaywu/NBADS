@@ -1087,7 +1087,59 @@ per row instead of pretending the night is empty.
 Measured after the change: `/api/dates` = Nov 1–14; today (Nov 4) **14 games, 14 with streams**;
 Nov 5 → 2/2; Nov 6 → 9 fixtures, 0 streams; Nov 7 → 7/0; Nov 10 → 6/0; Nov 13 → 9/0.
 
-### 13.17 A folder that refuses to launch the .NET launcher
+### 13.18 What happens when a stream lags or dies (and how it knows)
+
+Two different problems, because we only own one of the players.
+
+**Channels (NBA TV) — the page owns the video element, so breakage is measurable.**
+A 1 s watchdog plus event hooks, no polling of anything remote:
+
+| Signal | Threshold | Source |
+|---|---|---|
+| no progress | `currentTime` unchanged 4 s while not paused/seeking and `readyState < 3` | `v.currentTime` in a 1 s timer |
+| repeated buffering | 3 `waiting` events within 60 s | `v.addEventListener('waiting')` |
+| fatal feed error | hls.js `ERROR` with `fatal`, **after** the one automatic retry | `Hls.Events.ERROR` |
+| dead mirror | `/api/play` returns `ok:false` | relay would not start |
+
+On any of those it hops to the next channel in `feeds.txt` that it has not tried, once per
+15 s (`mirrorLastSwitch`), and says so in the toast and in `#nowTitle` — `NBA TV 1080p60 --
+main  (mirror 2/5)`. When every mirror has been tried it stops and says *pick one manually*
+instead of looping forever. A manual click clears `mirrorTried`, so failover never fights the
+user. Diagnostics gained a `mirror` row (`index/total, tried, last fail reason`).
+
+**Game feeds — an iframe on someone else's domain.** The page cannot see its `readyState`,
+its stalls or its rate. So: `/api/health?u=` probes the frame server-side every 10 s, requires
+the feed to be *lagging* and older than 120 s, then offers the best higher-resolution
+candidate from `/api/candidates` **as a confirm dialog** (switching means losing position, and
+a wrong guess is worse than a prompt). With ≥3 "frozen?" reports and no better candidate it
+switches to any candidate that answers.
+
+**The bug this uncovered.** While testing failover with a deliberately dead URL, `/api/play`
+answered `ok:true, port 8900` and the page happily played *another* relay's stream. Two causes,
+both real: `free_port()` tested a port by `bind()`-ing `127.0.0.1` while the running relay was
+on `0.0.0.0` — and `HTTPServer` sets `SO_REUSEADDR`, so on Windows that bind **succeeds** on a
+busy port — and nothing verified *whose* relay answered. Now `free_port()` also tries to
+`connect()` (a listener answers, a free port refuses) and skips ports already in `RELAYS`, and
+`start_relay()` fetches `/stats` and refuses if `source != url`. Measured: dead URL →
+`{"ok":false,"error":"relay failed"}`, then the page's failover moved to mirror 2/5 and played.
+An honest earlier false positive: the same dead entry *played fine* and looked like failover
+working, when it was the hijack.
+
+### 13.19 Folders, ports and other lies a test can tell you
+
+Short list of traps this project hit, kept because each one cost time:
+
+- `Test-Path 'C:\Users\'` is `true` — a directory is not `pythonw.exe`. Use `-PathType Leaf`.
+- `Start-Process` children inherit the tool's stdout pipe; a healthy GUI app then looks dead
+  while the harness waits for EOF. Redirect to files, or launch via `explorer.exe`.
+- `cmd /c start "" "x.exe" --port 8801` makes `cmd` treat `--port` as the program.
+- `[CmdletBinding()] param(...)` must be the first statement in a script.
+- `git ls-remote` is the cheap truth for "did the push land"; `gh api` needs `--jq` in a
+  variable when the expression contains spaces, or PowerShell splits it.
+- `curl.exe` output is an array of lines in PowerShell: `.Length` is the line count, and
+  `-match` returns the matching lines, not a boolean.
+
+### 13.20 A folder that refuses to launch the .NET launcher
 
 `C:\AI STUFF\Local\nba\hub\NBAHub.exe` stopped starting: no window, no `launcher.log`,
 `ExitCode` unreadable. The same bytes (identical SHA-256) ran from
