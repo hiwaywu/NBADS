@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -252,17 +253,35 @@ SCHED = {}
 SCHED_TTL = 300
 
 
+def _safe_espn_day(day):
+    try:
+        return espn_day(day)
+    except Exception:
+        return []
+
+
 def schedule_window():
+    """ESPN's fixtures for a two-week window.
+
+    It used to be -2..+3 days, which meant picking a date five days out showed
+    "no games listed" even though the NBA schedule is public. The stream sites
+    only post a few days ahead, so those later days come back as fixtures with
+    stream=False -- the UI says "no stream listed yet" instead of pretending the
+    night is empty.
+    """
     now = time.time()
     hit = SCHED.get("w")
     if hit and now - hit[0] < SCHED_TTL:
         return hit[1]
     import datetime as _dt
     base = _dt.date.today()
+    days = [(base + _dt.timedelta(days=off)).strftime("%Y%m%d")
+            for off in range(-3, 11)]
     rows = []
-    for off in (-2, -1, 0, 1, 2, 3):
-        d = base + _dt.timedelta(days=off)
-        rows += espn_day(d.strftime("%Y%m%d"))
+    # 14 tiny JSON documents: fetch them together, ~0.3 s instead of ~3 s
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for part in pool.map(_safe_espn_day, days):
+            rows.extend(part)
     SCHED["w"] = (now, rows)
     return rows
 
@@ -901,11 +920,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if u.path == "/api/dates":
             try:
-                ds = {g["date"] for g in all_games() if g.get("date")}
+                gs = all_games()
+                ds = {g["date"] for g in gs if g.get("date")}
                 for r in schedule_window():
                     if r.get("date"):
                         ds.add(r["date"])
-                return self._send(200, json.dumps({"dates": sorted(ds)}))
+                # how many of that day's games actually have a stream listed:
+                # the sources post ~4 days ahead, the schedule is known further out
+                streams = {}
+                for g in gs:
+                    if g.get("stream"):
+                        streams[g["date"]] = streams.get(g["date"], 0) + 1
+                return self._send(200, json.dumps({"dates": sorted(ds),
+                                                   "streams": streams,
+                                                   "today": time.strftime("%Y-%m-%d")}))
             except Exception as exc:
                 return self._send(200, json.dumps({"dates": [], "error": str(exc)}))
 

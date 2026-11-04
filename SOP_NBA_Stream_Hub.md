@@ -1065,6 +1065,47 @@ Sizes: **11.8 MB zip**, 23.7 MB extracted (`python` 23.2, `nba` 0.5), launcher 2
 first attempt measured 81.7 MB because the test run had left a browser profile inside the
 bundle — clean the profile out before zipping, or you ship the tester's cache.
 
+### 13.16 "There are no games for later days"
+
+The date arrow let the user walk to **Nov 10** and it said *no games listed for this date*,
+with 4 channels underneath. Two gaps, only one of them real:
+
+1. `schedule_window()` asked ESPN for `range(-2, 4)` — today ±3 days. Any date past that had
+   **no fixtures at all**, because the only games in the list come from that window plus the
+   scraped stream pages. The league schedule is public, so this was self-inflicted.
+2. The stream sites genuinely do not list a week ahead: their pages carried 17 events covering
+   roughly Nov 2–5, so Nov 6 onward had fixtures and no streams.
+
+Fix: ESPN window `range(-3, 11)` (two weeks), fetched **in parallel** — 14 small JSON documents
+went from ~3 s serial to **1.2 s** (`ThreadPoolExecutor(6)`). `hub.py` did not import it, so the
+first deploy answered every endpoint with `{"dates":[],"error":"name 'ThreadPoolExecutor' is not
+defined"}` — read the first response after a deploy, not just the exit code.
+`/api/dates` now returns `dates` **and** `streams: {date: count}`, and the page says
+`fixtures only - the stream sources list a couple of days ahead` plus `no stream listed yet`
+per row instead of pretending the night is empty.
+
+Measured after the change: `/api/dates` = Nov 1–14; today (Nov 4) **14 games, 14 with streams**;
+Nov 5 → 2/2; Nov 6 → 9 fixtures, 0 streams; Nov 7 → 7/0; Nov 10 → 6/0; Nov 13 → 9/0.
+
+### 13.17 A folder that refuses to launch the .NET launcher
+
+`C:\AI STUFF\Local\nba\hub\NBAHub.exe` stopped starting: no window, no `launcher.log`,
+`ExitCode` unreadable. The same bytes (identical SHA-256) ran from
+`C:\AI STUFF\DeepSeek\NBADS-main\nba\hub\`, from `%TEMP%`, and from a **new** folder
+`C:\AI STUFF\NBAHub\hub\`. Inside the poisoned tree a renamed copy (`NBAPC.exe`, `NBAHub2.exe`)
+failed the same way, and so did the same filename in a sibling folder — that tree, not the name.
+
+Ruled out with evidence: Mark-of-the-Web (`Get-Item -Stream *` → only `:$DATA`), Smart App
+Control (`VerifiedAndReputablePolicyState = 0`), AppLocker/CodeIntegrity events (none),
+Defender detections (none, only health events), ASR rules (empty), ACLs (`Authenticated Users`
+has Modify), and "the folder blocks exes" — `whoami.exe` copied into it ran and printed the
+user. That leaves managed image activation, and the workaround is the fix: the live install
+moved to `C:\AI STUFF\NBAHub\`, the desktop shortcut retargets to
+`C:\AI STUFF\NBAHub\hub\NBAHub.exe`, and `tools\deploy.ps1` defaults there with a comment
+saying why. Launching through `explorer.exe "…\NBAHub.exe"` is the faithful double-click test;
+`Start-Process` children inherit the tool's pipe, which can make a healthy app look dead while
+the harness waits for EOF.
+
 
 
 

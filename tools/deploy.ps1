@@ -8,9 +8,15 @@
 # copy has cost real time. This copies the *runtime* files only (never the browser
 # profiles or logs), backs up what it overwrites, restarts the hub detached from
 # this shell, and proves it answers before returning.
+#
+# NOTE ON THE FOLDER: do not deploy under C:\AI STUFF\Local\. On this machine the
+# launcher .NET exe dies before running a single line there (no log, no window, no
+# AppLocker/Defender event) while the very same bytes run from C:\AI STUFF\NBAHub\
+# and C:\Users\...\Temp. Native exes are unaffected, so it is specific to managed
+# image activation in that tree. C:\AI STUFF\NBAHub is the verified home.
 [CmdletBinding()]
 param(
-    [string]$Live = "C:\AI STUFF\Local\nba",
+    [string]$Live = "C:\AI STUFF\NBAHub",
     [int]$Port = 8790,
     [string]$BindHost = "0.0.0.0"
 )

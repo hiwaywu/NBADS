@@ -1,7 +1,7 @@
-# NBADS — NBA stream hub + Android shell
+# NBADS â€” NBA stream hub + Android shell
 
 A local hub that lists tonight's NBA games from the real schedule, finds a stream for the one
-you click, and plays it with the highest quality the source offers — buffered locally so it
+you click, and plays it with the highest quality the source offers â€” buffered locally so it
 cannot stutter, and wrapped so you never see the host site's nav bar, chat column or ads.
 
 Two pieces:
@@ -16,7 +16,7 @@ without rebuilding the APK.
 
 ---
 
-## Quick start (PC) — the app
+## Quick start (PC) â€” the app
 
 ```
 nba\hub\NBAHub.exe
@@ -26,7 +26,7 @@ Double-click it. It starts the hub if it is not already running, waits until it 
 opens a **chromeless chromium window** (Chrome or Edge, `--app`, private profile) showing the
 list. That window *is* the app: no tabs, no address bar, its own icon in the taskbar.
 
-### Is the exe standalone? No — and here is the honest dependency list
+### Is the exe standalone? No â€” and here is the honest dependency list
 
 `NBAHub.exe` is 23 KB. It is a **launcher**, not the app. It needs, in the same tree:
 
@@ -40,7 +40,7 @@ list. That window *is* the app: no tabs, no address bar, its own icon in the tas
 | **.NET Framework 4.x** | what `NBAHub.exe` itself is compiled against | built into Win10/11 |
 | *optional:* `playwright` + its chromium | game probing only (`/api/resolve`); without it channels are unaffected and games still open in the browser | ~200 MB |
 
-### The portable bundle — no Python needed on the target PC
+### The portable bundle â€” no Python needed on the target PC
 
 `releases/NBAHub-portable.zip` (**11.8 MB**, 23.7 MB extracted) contains its own interpreter:
 
@@ -49,19 +49,19 @@ START.bat                  double-click this
 README-PORTABLE.txt        what is inside, what it needs, troubleshooting
 python\                    Python 3.13.7 embeddable + requests/urllib3 (23 MB)
 nba\hub\NBAHub.exe         the launcher (23 KB)
-nba\hub\hub.py …           server, page, hls.min.js, probes
+nba\hub\hub.py â€¦           server, page, hls.min.js, probes
 nba\relay.py, feeds.txt    relay + channel list
 ```
 
 The launcher looks for `..\..\python\pythonw.exe` first (`using the bundled interpreter` in
 `launcher.log`), so a PC with no Python at all runs it. What it still wants: a browser and
-.NET 4.x — both effectively part of Windows. Playwright is not bundled; add it with
+.NET 4.x â€” both effectively part of Windows. Playwright is not bundled; add it with
 `python\python.exe -m pip install playwright` if you care about probing game pages.
 
-Unzip somewhere writable (Desktop, Documents — **not** Program Files: the window profile is
+Unzip somewhere writable (Desktop, Documents â€” **not** Program Files: the window profile is
 written next to the exe).
 
-**Close the window and everything stops** — the relays and the Python server are shut down via
+**Close the window and everything stops** â€” the relays and the Python server are shut down via
 a loopback-only `/api/shutdown`. Nothing is left running in the background.
 
 ```text
@@ -75,7 +75,7 @@ NBAHub.exe --dir PATH     where hub.py lives (default: next to the exe)
 Details worth knowing:
 
 - **Which browser.** Chrome first, Firefox second, Brave, and **Edge only if it is the last
-  chromium installed** — Edge is the Windows default, and it kept opening when something asked
+  chromium installed** â€” Edge is the Windows default, and it kept opening when something asked
   for "the browser". The launcher logs its choice:
   `browser=chrome exe=C:\Program Files\Google\Chrome\Application\chrome.exe`.
   Force another one either way:
@@ -83,19 +83,19 @@ Details worth knowing:
   - or drop a `browser.txt` next to `NBAHub.exe` holding `chrome`, `firefox`, `edge`, `brave`
     or a full path to an `.exe`
   Chrome/Brave/Edge get a chromeless `--app` window; Firefox gets its own profile and instance
-  (`-no-remote -new-instance -profile appprofile -new-window …`) because it has no app mode.
+  (`-no-remote -new-instance -profile appprofile -new-window â€¦`) because it has no app mode.
   `/api/ping` reports the choice (`"browser":"chrome"`), and games opened from the PC go
   through the same function.
 - **On the phone** the game hand-off is pinned to Chrome (`com.android.chrome`), then Firefox
-  (`org.mozilla.firefox`), then a chooser — it no longer follows the system default (which is
+  (`org.mozilla.firefox`), then a chooser â€” it no longer follows the system default (which is
   Edge on many phones). That needed a `<queries>` block in the manifest: Android 11+ hides
   installed packages, so `getLaunchIntentForPackage("com.android.chrome")` silently returned
   null without it.
 - If a hub is **already running** (started by `NBAHUB.bat`, or a second double-click) the app
-  reuses it, opens another window, and does **not** stop it on close — the owner keeps owning.
+  reuses it, opens another window, and does **not** stop it on close â€” the owner keeps owning.
 - Log of every decision: `%LOCALAPPDATA%\NBAHubPC\launcher.log`.
 - Build/rebuild it: `powershell -ExecutionPolicy Bypass -File pc\build-pc.ps1` (uses the .NET
-  Framework compiler that ships with Windows — no Visual Studio, no NuGet).
+  Framework compiler that ships with Windows â€” no Visual Studio, no NuGet).
 - No Chrome, Firefox or Edge installed? It falls back to your default browser plus a small
   window that keeps the server alive until you close it.
 
@@ -103,22 +103,22 @@ Details worth knowing:
 
 ## What the page does (same in the app window or a browser)
 
-- **Games** — click a row marked `live`. The feed is probed first; the player opens in a
+- **Games** â€” click a row marked `live`. The feed is probed first; the player opens in a
   sandboxed 16:9 shell, ad-free and popup-proof.
-- **NBA TV** — always-on channels. These play *inside* the page through the local relay:
-  1080p60, ~60 s buffered, 60–200 Mbps pull.
-- **latency** — the bar shows `14.2s behind live` (straight from hls.js). Measured on this PC:
-  **~0.4–1.2 s from click to first frame**, 14.6 s behind live by default, **8.2 s with
+- **NBA TV** â€” always-on channels. These play *inside* the page through the local relay:
+  1080p60, ~60 s buffered, 60â€“200 Mbps pull.
+- **latency** â€” the bar shows `14.2s behind live` (straight from hls.js). Measured on this PC:
+  **~0.4â€“1.2 s from click to first frame**, 14.6 s behind live by default, **8.2 s with
   `low delay`**, zero stalls in a 60 s sample. The relay fetches ahead of the player over 6
   parallel keep-alive sockets, so the picture reads from localhost.
-- **fullscreen** — the picture is letterboxed to the stream's own ratio, never stretched:
+- **fullscreen** â€” the picture is letterboxed to the stream's own ratio, never stretched:
   measured 1680x945 on a 16:10 1680x1050 screen (16:9 stream), and 1080x609 on a 1080x2400
-  phone. `✕ exit full` sits in the corner, Esc works too.
+  phone. `âœ• exit full` sits in the corner, Esc works too.
 - Keys on the PC: `f` fullscreen, `m` mute, `r` reload the feed (plus Esc to leave fullscreen).
-- `frozen?` — one tap logs a freeze so the switching policy can act; a cross-origin frame
+- `frozen?` â€” one tap logs a freeze so the switching policy can act; a cross-origin frame
   cannot be watched by code.
-- `reload stream` — reconnect the same feed without losing state.
-- **long-press the `nba hub` title** — diagnostics: secure context, hls.js, Widevine/EME,
+- `reload stream` â€” reconnect the same feed without losing state.
+- **long-press the `nba hub` title** â€” diagnostics: secure context, hls.js, Widevine/EME,
   relay state, video readyState. This is the first thing to look at when a stream is black.
 
 CLI equivalents live in `nba/`: `NBA.bat` (channel in VLC), `GAMES.bat` (game list),
@@ -138,8 +138,8 @@ anywhere to type an address instead, or to run `scan wifi` again.
   EME is unavailable to a WebView on a `http://192.168.x.x` origin, so an in-app frame can
   only ever be a black rectangle. A browser is a secure context with a CDM.
 - **fullscreen** works through the video element (`onShowCustomView`), not `requestFullscreen`.
-- **Back** leaves fullscreen, then a game page, then the app — it never lands on a blank page.
-- After a game hands you to the site, the `⌂` chip on the right edge brings you back.
+- **Back** leaves fullscreen, then a game page, then the app â€” it never lands on a blank page.
+- After a game hands you to the site, the `âŒ‚` chip on the right edge brings you back.
 
 If the phone cannot reach the PC at all, run **`nba\hub\FIREWALL.bat`** once as admin: it opens
 inbound TCP `8790` (hub) and `8900-8959` (relays), which Windows blocks on a Private network.
@@ -163,7 +163,7 @@ adb install -r --no-incremental ...   # fails with INSTALL_FAILED_UPDATE_INCOMPA
 
 ## Read this before changing anything
 
-**[SOP_NBA_Stream_Hub.md](SOP_NBA_Stream_Hub.md)** — the full procedure, including the bugs
+**[SOP_NBA_Stream_Hub.md](SOP_NBA_Stream_Hub.md)** â€” the full procedure, including the bugs
 that cost the most time:
 
 - the stream sites stamp games with the **UTC** date, so a 7 PM Eastern tip-off is numbered
@@ -171,9 +171,9 @@ that cost the most time:
 - `d8` from build-tools 34 crashes on anonymous inner classes; use 36
 - `adb install` without `--no-incremental` produces phantom app deaths
 - Android's WebView drops the user gesture across `await`, so autoplay must start muted
-- **a relay URL of `127.0.0.1` means "this phone", not "that PC"** — the hub returns the host
+- **a relay URL of `127.0.0.1` means "this phone", not "that PC"** â€” the hub returns the host
   the client used, the relay binds `0.0.0.0`, and that one line was the whole "the stream does
-  not play" bug (SOP §13)
+  not play" bug (SOP Â§13)
 
 ## Limits, stated plainly
 
@@ -181,7 +181,7 @@ that cost the most time:
   Android WebView cannot either (no EME on an insecure origin). Desktop: an embedded Chrome
   frame. Phone: the browser. Channels are open HLS and run in our own player.
 - The aggregator HTML is the fragile dependency: if their `ItemList` block changes shape, the
-  game list empties — visibly, which is the failure mode worth having.
+  game list empties â€” visibly, which is the failure mode worth having.
 - A pre-game page shows a countdown, not a picture. `has a feed (opens at tip-off)` in the
   list means exactly that; the probe cannot make a stream exist before tip-off.
 - Software-rendered emulators die on 1080p60 decode after a few minutes (`qemu ... 0xc0000005`
@@ -196,12 +196,19 @@ in one while the phone talks to the other has cost real time. After any change:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\deploy.ps1
-#   -Live "D:\nba"   -Port 8790   -BindHost 0.0.0.0
+#   -Live "C:\AI STUFF\NBAHub"   -Port 8790   -BindHost 0.0.0.0
 ```
+
+The live install lives in `C:\AI STUFF\NBAHub\` (hub files in `hub\`, `relay.py` and `feeds.txt`
+one level up — exactly the layout `hub.py` expects). **Do not deploy under `C:\AI STUFF\Local\`**:
+on this machine the launcher exe there exits before running a single line — no log, no window,
+no AppLocker or Defender event — while the identical bytes run from `C:\AI STUFF\NBAHub\` or
+`%TEMP%`. `whoami.exe` runs fine in the same folder, so it is specific to managed image
+activation, and it is why the desktop shortcut now points at `C:\AI STUFF\NBAHub\hub\NBAHub.exe`.
 
 It copies the **runtime** files only (never `browserprofile/`, `appprofile/`, logs), backs up
 what it overwrites as `*.bak-<timestamp>`, stops the old hub and its relays, starts the new one
-**detached from the calling shell**, and does not return until `/api/ping` answers — then prints
+**detached from the calling shell**, and does not return until `/api/ping` answers â€” then prints
 every LAN URL to type on the phone, with its adapter name.
 
 ## Layout

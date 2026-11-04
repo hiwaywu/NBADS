@@ -329,10 +329,17 @@ function render(){
     const e = document.createElement('div'); e.className = 'empty';
     const nd = dates.filter(d => d > curDate)[0];
     e.innerHTML = q ? 'nothing matches that filter.' :
-      'no games listed for this date.' + (nd ? '<br><br><a href="#" id="jump" style="color:#3ddc84">jump to ' + nd + '</a>' : '');
+      'no games scheduled for this date.' + (nd ? '<br><br><a href="#" id="jump" style="color:#3ddc84">jump to ' + nd + '</a>' : '');
     list.appendChild(e);
     const j = e.querySelector('#jump');
     if (j) j.addEventListener('click', ev => { ev.preventDefault(); curDate = nd; loadGames(); });
+  } else if (gs.every(g => g.stream === false) && !q){
+    // the fixture list comes from the league schedule (2 weeks out), the stream
+    // sites only post a few days ahead -- say so instead of looking broken
+    const w = document.createElement('div'); w.className = 'note show';
+    w.style.cssText = 'margin:0 12px 8px;padding:6px 9px;border-radius:6px;background:#141a20;border:1px solid #22303c;color:#8fa5b8;font-size:11px';
+    w.textContent = 'fixtures only - the stream sources list a couple of days ahead, so check back closer to tip-off';
+    list.appendChild(w);
   }
   gs.forEach(g => {
     const live = g.state === 'in';
