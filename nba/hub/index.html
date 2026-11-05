@@ -859,8 +859,10 @@ async function watchGame(g){
     // player host allows; the frame alone refuses to play outside its own sites
     const target = (j && (STANDALONE ? (j.browser || j.open) : (j.open || j.frame))) || g.url;
     if (!j || !j.ok){
-      const go = window.confirm('No feed answered the probe this time.\n\nOpen the stream page anyway?\n' + target);
-      if (!go) return;
+      // one tap should produce the picture, not a question. The probe can only
+      // check a feed that is already playing; before tip-off every mirror says
+      // "not yet", so asking here just adds a click between you and the page.
+      toast('opening the stream page in the app', 2400);
     } else if (g.state !== 'in'){
       toast('not tip-off yet \u2014 the page has the stream at ' + (g.time || 'game time'), 4200);
     }
