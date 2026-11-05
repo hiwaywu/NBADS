@@ -119,13 +119,20 @@ def parse_master(text, base):
 
 
 def parse_media(text):
-    """Return dict(seq, target, entries=[(url_rel, dur)], map_uri, endlist)."""
+    """Return dict(seq, target, entries=[(url_rel, dur, ad)], map_uri, endlist).
+
+    Ad breaks are marked in HLS several ways and live re-streams often carry all of
+    them: #EXT-X-CUE-OUT / -CONT / CUE-IN (SCTE-35 style), #EXT-X-SCTE35, and
+    #EXT-X-DATERANGE with an interstitial/ad class. Everything between OUT and IN is
+    an ad break -- that is what the relay drops so the player never sees it.
+    """
     lines = [l.strip() for l in text.splitlines()]
     seq = 0
     target = 6.0
     map_uri = None
     entries = []
     pending = None
+    in_ad = False
     for line in lines:
         if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
             seq = int(line.split(":", 1)[1])
@@ -134,13 +141,24 @@ def parse_media(text):
         elif line.startswith("#EXT-X-MAP:"):
             a = attrs(line)
             map_uri = a.get("URI")
+        elif line.startswith("#EXT-X-CUE-OUT:0"):
+            in_ad = False
+        elif line.startswith("#EXT-X-CUE-OUT") or line.startswith("#EXT-X-SCTE35"):
+            in_ad = True
+        elif line.startswith("#EXT-X-CUE-IN"):
+            in_ad = False
+        elif line.startswith("#EXT-X-DATERANGE"):
+            a = attrs(line)
+            cls = (a.get("CLASS") or "").lower()
+            if "ad" in cls or "interstitial" in cls or a.get("X-AD-ID") or a.get("SCTE35-OUT"):
+                in_ad = not (a.get("END-DATE") or a.get("DURATION"))
         elif line.startswith("#EXTINF:"):
             try:
                 pending = float(line.split(":", 1)[1].split(",")[0])
             except ValueError:
                 pending = target
         elif line and not line.startswith("#"):
-            entries.append((line, pending if pending is not None else target))
+            entries.append((line, pending if pending is not None else target, in_ad))
             pending = None
     return {"seq": seq, "target": target, "entries": entries,
             "map": map_uri, "endlist": "#EXT-X-ENDLIST" in text}
@@ -163,6 +181,8 @@ class Relay:
         self.prefetch = prefetch
         self.max_seconds = max_seconds
         self.segs = OrderedDict()          # seq -> bytes
+        self.ad_seqs = set()               # seqs inside an ad break
+        self.ads_skipped = 0
         self.durs = {}                     # seq -> duration
         self.uris = {}                     # seq -> absolute url
         self.map_uri = None
@@ -223,17 +243,22 @@ class Relay:
                     self.map_uri = urllib.parse.urljoin(base, m["map"])
                     self.map_data = fetch_bytes(self.sess, self.map_uri)
                 new = {}
-                for i, (rel, dur) in enumerate(m["entries"]):
+                for i, (rel, dur, ad) in enumerate(m["entries"]):
                     seq = m["seq"] + i
-                    new[seq] = (urllib.parse.urljoin(base, rel), dur)
+                    new[seq] = (urllib.parse.urljoin(base, rel), dur, ad)
                 with self.lock:
-                    for seq, (u, d) in new.items():
+                    for seq, (u, d, ad) in new.items():
                         self.uris[seq] = u
                         self.durs[seq] = d
+                        if ad:
+                            self.ad_seqs.add(seq)     # never downloaded, never served
+                        else:
+                            self.ad_seqs.discard(seq)
+                    self.ads_skipped = len(self.ad_seqs)
                 # fetch everything missing, newest first: the player wants to
                 # start at the live edge, so the newest segment must land first
                 with self.lock:
-                    missing = [s for s in new if s not in self.segs]
+                    missing = [s for s in new if s not in self.segs and s not in self.ad_seqs]
                 missing.sort(reverse=True)
                 newest = max(new) if new else None
                 if missing:
@@ -356,6 +381,10 @@ class Relay:
     def playlist_text(self):
         with self.lock:
             seqs = sorted(set(self.segs.keys()) | set(self.disk.keys()))
+            ads = set(self.ad_seqs)
+        # ad breaks are dropped, so the numbering has holes: state them honestly and
+        # mark each hole, or the player mis-maps timestamps across the missing ad
+        seqs = [s for s in seqs if s not in ads]
         if len(seqs) > self.window:
             # live window plus whatever the disk still holds (that is the point
             # of the DVR: the player may seek back into it)
@@ -368,9 +397,13 @@ class Relay:
                f"#EXT-X-MEDIA-SEQUENCE:{first}"]
         if self.map_data:
             out.append('#EXT-X-MAP:URI="/init.mp4"')
+        prev = None
         for s in seqs:
+            if prev is not None and s != prev + 1:
+                out.append("#EXT-X-DISCONTINUITY")
             out.append(f"#EXTINF:{self.durs.get(s, self.target):.3f},")
             out.append(f"/seg/{s}.ts")
+            prev = s
         return "\n".join(out) + "\n"
 
     def segment(self, seq):
@@ -396,6 +429,7 @@ class Relay:
             "segments_cached": n,
             "buffered_MB": round(b / 1e6, 2),
             "buffered_seconds": round(n * self.target, 1),
+            "ads_skipped": self.ads_skipped,
             "dvr_segments": dn,
             "dvr_MB": round(dmb, 1),
             "dvr_minutes_cap": self.dvr_minutes,
