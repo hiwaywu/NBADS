@@ -209,6 +209,11 @@ Deep link straight into a channel: `adb shell am start -n com.nbahub.app/.MainAc
 with its measured before/after, the mirror-chain crack, the League Pass boundary, the full
 verification harness and a catalogue of 21 traps. Read this one first.
 
+**[SOP_NBAHub_Capture_Ads_And_LeaguePass.md](SOP_NBAHub_Capture_Ads_And_LeaguePass.md)** — the same
+procedure in the SOP-collection house style: timeline, toolkit, the mirror chain and the
+harvest algorithm, what League Pass really blocks, the four ad layers, 25 traps, and how to
+publish and verify a release.
+
 **[SOP_NBA_Stream_Hub.md](SOP_NBA_Stream_Hub.md)** â€” the full procedure, including the bugs
 that cost the most time:
 
