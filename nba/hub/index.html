@@ -259,6 +259,7 @@
     <span class="pill" id="pillQ" style="display:none">-</span>
     <span class="pill" id="pillBuf" style="display:none">-</span>
     <span class="pill" id="pillLat" style="display:none" title="seconds behind the live edge">-</span>
+    <span class="pill" id="pillSrc" style="display:none" title="where this picture comes from">-</span>
     <div class="right">
       <button id="live" title="jump back to the live edge">live</button>
       <button id="low" title="smaller buffer, closer to live">low delay</button>
@@ -454,6 +455,8 @@ async function playChannel(c, byMirror){
       $('#pillQ').className = 'pill good';
       $('#pillQ').style.display = '';
     }
+    const srcPill = $('#pillSrc');
+    if (srcPill){ srcPill.textContent = 'relay - ' + (c.name || 'channel'); srcPill.className = 'pill good'; srcPill.style.display = ''; }
     attach(j.url);
     toast('relay up - buffering the live edge');
     pollStats();
@@ -893,6 +896,12 @@ async function watchGame(g){
     document.body.classList.add('iframeMode');
     pf.style.display = 'block';
     pf.src = '/watch?u=' + encodeURIComponent(target) + '&_=' + Date.now();
+    const srcPill = $('#pillSrc');
+    if (srcPill){
+      let h = ''; try { h = new URL(target).hostname; } catch(e){}
+      srcPill.textContent = 'site player - ' + (h || 'external') + (h.indexOf('akamaized') >= 0 || h.indexOf('nba') >= 0 ? '  (League Pass)' : '');
+      srcPill.className = 'pill'; srcPill.style.display = '';
+    }
     $('#reloadStream').style.display = 'block';
     polReset(g, (j.probe || {}).h || 0);
     const st = j.probe || {};
