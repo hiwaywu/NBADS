@@ -26,3 +26,6 @@ releases/*.zip
 
 # launcher build output (the shipped copy is nba/hub/NBAHub.exe)
 pc/*.exe
+
+# apk build output (the shipped copy is releases/NBAHub.apk)
+android/NBAHub.apk

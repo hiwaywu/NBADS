@@ -362,7 +362,7 @@ function render(){
   gs.forEach(g => {
     const live = g.state === 'in';
     const done = g.state === 'post';
-    const handoff = IS_MOBILE && (!window.Hub || !CAN_DRM);   // phone: DRM needs a real browser
+    const handoff = IS_MOBILE;   // phone: Widevine games play in a real browser
     let meta, badge, cls;
     if (done) { meta = (g.time ? g.time + ' - ' : '') + 'final'; badge = 'final'; cls = ''; }
     else if (live) { meta = 'live now' + (handoff ? ' \u00b7 opens in browser' : ''); badge = 'live'; cls = 'live'; }
@@ -403,6 +403,9 @@ async function loadGames(){
 }
 
 async function playChannel(c, byMirror){
+  // what is on screen now: a mirror that refuses to start must not take the
+  // title (or the failover position) from the stream that is still playing
+  const prev = { ch: lastChannel, idx: mirrorIdx, title: $('#nowTitle').textContent };
   lastChannel = c;
   const idx = channels.findIndex(x => x.url === c.url);
   if (!byMirror) { mirrorTried.clear(); mirrorReason = ''; }
@@ -428,6 +431,10 @@ async function playChannel(c, byMirror){
   } catch(e){
     toast('could not start that channel: ' + e.message, 4200);
     setSpin(false);
+    if (hls && prev.ch){
+      if (byMirror) mirrorTried.add(c.url);
+      lastChannel = prev.ch; mirrorIdx = prev.idx; $('#nowTitle').textContent = prev.title;
+    }
     // a dead mirror is also a reason to move on, not just to sit there
     if (!byMirror) return mirrorFail('could not start: ' + e.message);
   }
@@ -444,7 +451,7 @@ async function playChannel(c, byMirror){
 // 15 s, and only while the channel list has an untried entry. A manual click
 // resets the whole thing, so it never fights the user.
 let mirrorIdx = -1, mirrorTried = new Set(), mirrorLastSwitch = 0;
-let seekGraceUntil = 0;
+let seekGraceUntil = 0, attachAt = 0;
 let mirrorReason = '', mirrorStalls = [];
 let mirrorLastT = -1, mirrorLastMove = Date.now();
 
@@ -487,6 +494,9 @@ setInterval(() => {
 }, 1000);
 
 function noteStall(){
+  // startup and the jump to the live edge raise 'waiting' by design -- only
+  // buffering once the picture is running says anything about the mirror
+  if (Date.now() - attachAt < 12000 || v.seeking || Date.now() < seekGraceUntil) return;
   mirrorStalls.push(Date.now());
   mirrorStalls = mirrorStalls.filter(t => Date.now() - t < 60000);
   if (mirrorStalls.length >= 3) { mirrorStalls = []; mirrorFail('repeated buffering'); }
@@ -547,6 +557,7 @@ function attach(url){
   $('#idle').style.display = 'none';
   document.body.classList.add('playing');
   relayBase = url.replace(/\/live\.m3u8.*$/, '');
+  attachAt = Date.now();
   if (hls){ hls.destroy(); hls = null; }
   v.removeAttribute('src');
   setSpin(true, 'starting the stream...');
@@ -801,8 +812,12 @@ async function watchGame(g){
     hideUnmute();
     // Widevine cannot be decrypted by a webview without EME; Chrome on the same
     // phone can. Hand the link over instead of showing a black rectangle.
-    if (IN_APP && !CAN_DRM && window.Hub && Hub.openExternal){
-      toast('this webview has no DRM support \u2014 opening in your browser', 4200);
+    // The standalone app serves this page from 127.0.0.1, which *is* a secure
+    // context, so CAN_DRM can come out true -- but the stream sites are full of
+    // popups and the WebView's Widevine is not reliable. Chrome is the known-good
+    // path, so the app always hands games over.
+    if (IN_APP && window.Hub && Hub.openExternal){
+      toast('opening the game in your browser', 3200);
       Hub.openExternal(target);
       return;
     }
@@ -892,7 +907,12 @@ $('#low').onclick = () => {
   toast(lowMode ? 'low delay on - ~20s behind live, less cushion' : 'low delay off - bigger cushion, smoother', 3000);
   if (lastChannel) playChannel(lastChannel);
 };
-$('#reload').onclick = () => { dates = []; boot(); };$('#freezeBtn').onclick = () => reportFreeze();
+$('#reload').onclick = () => {
+  dates = [];
+  // the phone app re-reads the stream sites and feeds.txt on this; the PC hub
+  // answers 404 and its own 4-minute cache applies -- either way, reload
+  fetch('/api/refresh?_=' + Date.now()).catch(() => {}).then(() => boot());
+};$('#freezeBtn').onclick = () => reportFreeze();
 $('#live').onclick = () => seekLive();
 $('#unmute').onclick = function(){ v.muted = false; v.play().catch(()=>{}); hideUnmute(); };
 $('#reloadStream').onclick = () => {

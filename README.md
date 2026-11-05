@@ -9,10 +9,10 @@ Two pieces:
 | Piece | Runs on | What it does |
 |---|---|---|
 | `nba/` + `pc/` | Windows PC (Python 3.11+) | schedule sync, feed probing, HLS relay, browser UI, 20 KB `.exe` launcher |
-| `android/` | any Android 7+ phone | 20 KB WebView shell: finds the hub on the wifi, plays NBA TV in-app, hands games to the browser |
+| `android/` | any Android 7+ phone | **standalone** 180 KB app: the hub and relay run inside it, no PC needed |
 
-The desktop does the work; the phone is a remote screen for it. Fixes ship to the phone
-without rebuilding the APK.
+The phone app no longer needs the PC: it carries the same hub (schedule, stream sites, the
+buffering relay) and serves the same page to itself on `127.0.0.1`. The PC app is unchanged.
 
 ---
 
@@ -127,33 +127,63 @@ CLI equivalents live in `nba/`: `NBA.bat` (channel in VLC), `GAMES.bat` (game li
 Plain browser, no exe: `cd nba\hub; .\NBAHUB.bat` starts the server and opens a Chrome app
 window; or open `http://127.0.0.1:8790/` yourself.
 
-## Quick start (Android)
+## Quick start (Android) — standalone, no PC
 
-Install `releases/NBAHub.apk`, open it, and keep `NBAHUB.bat` running on the PC on the same
-wifi. The app now **finds the PC itself** (scans the /24 for `:8790/api/ping`); long-press
-anywhere to type an address instead, or to run `scan wifi` again.
+Install `releases/NBAHub.apk` and open it. That is all: no PC, no wifi pairing, works on
+mobile data too.
 
-- **NBA TV** plays in the app: the relay is reached over the wifi, not `127.0.0.1`.
-- **Games** open in the phone's browser. That is not laziness: game feeds are Widevine, and
-  EME is unavailable to a WebView on a `http://192.168.x.x` origin, so an in-app frame can
-  only ever be a black rectangle. A browser is a secure context with a CDM.
-- **fullscreen** works through the video element (`onShowCustomView`), not `requestFullscreen`.
-- **Back** leaves fullscreen, then a game page, then the app â€” it never lands on a blank page.
-- After a game hands you to the site, the `âŒ‚` chip on the right edge brings you back.
+> Upgrading from 1.x: **uninstall the old app first.** 2.0 is signed with a different key, so
+> Android refuses to install it over the old one (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`).
 
-If the phone cannot reach the PC at all, run **`nba\hub\FIREWALL.bat`** once as admin: it opens
-inbound TCP `8790` (hub) and `8900-8959` (relays), which Windows blocks on a Private network.
+What runs inside the APK (`android/src/com/nbahub/app/`):
 
-Build it yourself:
+| File | Port of | Does |
+|---|---|---|
+| `LocalHub.java` | `hub.py` | HTTP server on `127.0.0.1:8790` (loopback only — nothing on the wifi can reach it), serves the bundled `index.html` + `hls.min.js`, answers the same `/api/*` the page already calls |
+| `Games.java` | `hub.py` | ESPN schedule (today −3…+10, any season date on demand), methstreams/crackstreams `ItemList`, joined by team name — same UTC-date fix |
+| `Relay.java` | `relay.py` | forces the top rendition, RAM ring + disk tier in the app cache (wiped on stop), 6 parallel pulls newest-first, served under `/relay/` |
+| `MainActivity.java` | — | WebView, video fullscreen, games handed to Chrome/Firefox, `⌂` chip back |
 
+The page is the **same file** as the PC one, so mirror failover, `low delay`, pause = DVR,
+`frozen?`, the latency pill and long-press diagnostics all work on the phone.
+
+Better than the 1.x relay, on both counts it used to drop:
+
+- `#EXT-X-DISCONTINUITY` is kept — ad splices no longer freeze the picture
+- `#EXT-X-KEY` (AES-128) is kept and the key is proxied, so encrypted feeds play
+- the playlist is only published once the joining batch is complete (newest-first downloads
+  used to make the first playlists start *earlier* on every refresh — a cold start on the
+  Amagi mirror failed on that)
+- a mirror that refuses to start no longer stops the one that is playing
+
+**Channel list updates itself.** `feeds.txt` is bundled, then refreshed from
+`raw.githubusercontent.com/hiwaywu/NBADS/main/nba/feeds.txt` on every start (and on
+`reload list`). Fix a dead mirror by editing that file on `main` — no APK rebuild. An optional
+third column sets a Referer for feeds that need one: `NAME | URL | https://referer/`.
+
+Games still open in the phone's browser (Chrome first, then Firefox): they are Widevine, and
+the WebView is not a reliable place to decrypt them. That is a DRM limit, not a PC one. On the
+phone, a game opens its first `Main N` player link without probing it — there is no headless
+browser to probe with.
+
+Data use: the relay pulls the stream's own bitrate (~5 Mbps for 1080p, ~2.2 GB/hour) plus a
+short burst to fill the buffer. It stops by itself 3 minutes after the player stops asking.
+
+Build it yourself (no Gradle, no Android Studio):
+
+```bash
+# Linux / macOS
+ANDROID_SDK=~/Android/Sdk ./android/build.sh        # build-tools 36 + platforms/android-35 + JDK 17+
+```
 ```powershell
-cd android
-.\build.ps1        # aapt2 -> javac -> d8 -> zipalign -> apksigner, no Gradle
+# Windows
+cd android; .\build.ps1
 adb uninstall com.nbahub.app          # after any keystore change
 adb install --no-incremental android\NBAHub.apk
-adb install -r --no-incremental ...   # fails with INSTALL_FAILED_UPDATE_INCOMPATIBLE if the
-                                      # debug keystore was regenerated; uninstall first
 ```
+
+Deep link straight into a channel: `adb shell am start -n com.nbahub.app/.MainActivity --es chan 1`.
+
 
 ## Screenshots
 
@@ -186,7 +216,7 @@ that cost the most time:
   list means exactly that; the probe cannot make a stream exist before tip-off.
 - Software-rendered emulators die on 1080p60 decode after a few minutes (`qemu ... 0xc0000005`
   in the Application log). That is the emulator, not the app; a real device is fine.
-- The PC has to stay reachable: ports `8790` and `8900-8959`. If a network is "guest /
+- Browsing the PC hub from another device (not the app) needs the PC reachable: ports `8790` and `8900-8959`. If a network is "guest /
   client-isolated", no rule helps.
 
 ## Deploying to the live install
@@ -219,8 +249,8 @@ nba/            hub, relay, probes, CLI launchers, feeds.txt
                 NBAHub.exe (the PC app, built by pc/build-pc.ps1)
 pc/             NBAPC.cs (the launcher), build-pc.ps1, app.ico
 tools/          deploy.ps1 (repo -> live install, restart, verify)
-android/        manifest, MainActivity.java, res/, build.ps1
-releases/       NBAHub.apk (signed, 25 KB); the portable bundle is a release asset
+android/        manifest, src/ (LocalHub, Relay, Games, MainActivity), res/, build.sh, build.ps1
+releases/       NBAHub.apk (standalone, signed, 180 KB); the portable bundle is a release asset
 docs/           screenshots + the scripts that produced them: cdp.py (drive the
                 phone's WebView over CDP), desktop_check.py, stats_check.py
                 (relay -> stat pill), lag_check.py / phone_lag_check.py
