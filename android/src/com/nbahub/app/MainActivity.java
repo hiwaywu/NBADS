@@ -27,6 +27,8 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.WebResourceResponse;
+import java.io.ByteArrayInputStream;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -48,6 +50,17 @@ import android.widget.Toast;
 public class MainActivity extends Activity {
 
     private static final String TAG = "nbahub";
+    /** Ad / tracker hosts: a game page is mostly these. Blocking them here is the
+     *  phone equivalent of what the PC /play proxy already strips. */
+    private static final String[] AD_HOSTS = {
+            "subduepaler.cyou", "doubleclick.net", "googlesyndication.com",
+            "adservice.google.com", "googletagmanager.com", "google-analytics.com",
+            "histats.com", "dtscout.com", "sharethis.com", "crwdcntrl.net",
+            "lijit.com", "intentiq.com", "mrktmtrcs.net", "popads.net",
+            "propellerads.com", "onclicksuper.com", "adcash.com", "tynt.com",
+            "cloudflareinsights.com", "reliedhounder.com", "dtscdn.com"
+    };
+
 
     private LocalHub hub;
     private String home;                 // http://127.0.0.1:PORT/
@@ -159,10 +172,25 @@ public class MainActivity extends Activity {
                 // overlay waits for a click, and the tap that brought us here does not
                 // count inside the new document, so start it ourselves: mute, click the
                 // overlay, play, and keep nudging for a few seconds.
+                Log.i(TAG, "page finished: " + url);
                 if (url != null && !isHome(url)) kickPlayback(view);
             }
 
-            @Override
+                        @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                try {
+                    String u = req.getUrl() != null ? req.getUrl().toString().toLowerCase() : "";
+                    for (String h : AD_HOSTS) {
+                        if (u.contains(h)) {
+                            Log.i(TAG, "ad blocked: " + u);
+                            return new WebResourceResponse("text/plain", "utf-8",
+                                    new ByteArrayInputStream(new byte[0]));
+                        }
+                    }
+                } catch (Exception e) { }
+                return null;
+            }
+@Override
             public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
                 if (req != null && req.isForMainFrame() && isHome(String.valueOf(req.getUrl()))) {
                     Log.w(TAG, "home failed: " + err.getErrorCode() + " " + err.getDescription());
@@ -255,7 +283,16 @@ public class MainActivity extends Activity {
 
     /** Start the player on a page we did not write: mute, click, play, repeat. */
     private void kickPlayback(final WebView view) {
-        final String js = "(function(){var n=0,k=false;function go(){n++;"
+        Log.i(TAG, "kick playback scheduled");
+        final String js = "(function(){try{var st=document.createElement('style');"
+            + "st.textContent='header,nav,aside,footer,.navbar,.site-header,.topbar,header[class],"
+            + "body>header,body>nav,.top-menu,#header,#nav,[class*=chat],[id*=chat],"
+            + "[class*=banner],.notice,.alert{display:none!important}"
+            + "html,body{background:#000!important}';"
+            + "(document.body||document.documentElement).appendChild(st);"
+            + "setTimeout(function(){try{(document.body||document.documentElement)"
+            + ".appendChild(st.cloneNode(true));}catch(e){}},1500);}catch(e){}"
+            + "var n=0,k=false;function go(){n++;"
             + "var v=document.querySelector('video');"
             + "if(v){try{v.muted=true;}catch(e){}"
             + "try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}"
@@ -278,9 +315,11 @@ public class MainActivity extends Activity {
             + "try{document.documentElement.setAttribute('data-nbaautoplay','armed');}catch(e){}"
             + "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',"
             + "function(){setTimeout(go,400);});}else{setTimeout(go,400);}})();";
-        view.postDelayed(new Runnable() {
-            public void run() { try { view.evaluateJavascript(js, null); } catch (Exception e) { } }
-        }, 1200);
+        for (final long delay : new long[]{1200, 3000, 5000, 8000, 12000}) {
+            view.postDelayed(new Runnable() {
+                public void run() { try { view.evaluateJavascript(js, null); } catch (Exception e) { } }
+            }, delay);
+        }
     }
 
     /** JS bridge, same names the page already uses (Hub.openExternal, ...). */
