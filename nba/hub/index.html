@@ -197,6 +197,31 @@
     #unmute{top:10px;bottom:auto;transform:translateX(-50%);left:50%;padding:8px 14px;font-size:13px}
     #toast{bottom:auto;top:calc(46vh + 8px);font-size:12.5px}
   }
+
+  /* ---------------- Galaxy Z Fold inner screen ----------------
+     Inner display 2184x1968 at ~2.34 dppx: 842 x 934 css px upright, 934 x 842
+     turned. Upright it gets the phone layout, but with room for a full-width
+     picture. Turned, it is wider than 900 and gets the two-pane layout -- whose
+     one-line control bar did not fit in the 582 px beside the list: the page grew
+     to 1204 px, the WebView zoomed out and live / fullscreen fell off the edge.
+     The bar now wraps at every width, and touch screens get finger-sized rows. */
+  #bar{flex-wrap:wrap;height:auto;min-height:34px;row-gap:4px;padding-top:4px;padding-bottom:4px}
+  #bar .right{flex-wrap:wrap}
+  @media (min-width: 701px) and (max-width: 900px){
+    #stage{max-height:min(56vh, calc(100vw * 9 / 16))}
+    #toast{top:calc(min(56vh, 100vw * 9 / 16) + 8px)}
+  }
+  @media (pointer: coarse) and (min-width: 901px){
+    #side{width:320px;min-width:320px}
+    #bar{min-height:44px;padding:6px 10px;row-gap:6px}
+    #bar .title{max-width:100%;flex:1 1 100%;font-size:12.5px}
+    #bar .right{margin-left:0;gap:6px}
+    #bar button{padding:8px 12px;font-size:12.5px}
+    #datebar button{width:38px;height:38px;font-size:17px}
+    #search{padding:10px 12px;font-size:14px}
+    .row{padding:12px 14px}
+    .row .nm{font-size:14px}
+  }
 </style>
 </head>
 <body>

@@ -111,6 +111,9 @@ Details worth knowing:
   **~0.4â€“1.2 s from click to first frame**, 14.6 s behind live by default, **8.2 s with
   `low delay`**, zero stalls in a 60 s sample. The relay fetches ahead of the player over 6
   parallel keep-alive sockets, so the picture reads from localhost.
+- **Galaxy Z Fold** — cover screen: phone layout. Inner screen upright (842×934): full-width
+  picture over the list. Turned (934×842): list left, player right, and the control bar wraps
+  so nothing falls off the edge. Folding/unfolding mid-stream does not restart playback.
 - **fullscreen** â€” the picture is letterboxed to the stream's own ratio, never stretched:
   measured 1680x945 on a 16:10 1680x1050 screen (16:9 stream), and 1080x609 on a 1080x2400
   phone. `âœ• exit full` sits in the corner, Esc works too.
