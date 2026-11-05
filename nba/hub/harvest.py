@@ -20,6 +20,46 @@ import sys
 import time
 import urllib.request
 
+BLOCK_HOSTS = (
+    "subduepaler.cyou", "doubleclick.net", "googlesyndication.com", "adservice.google.com",
+    "googletagmanager.com", "google-analytics.com", "histats.com", "dtscout.com",
+    "sharethis.com", "crwdcntrl.net", "lijit.com", "intentiq.com", "mrktmtrcs.net",
+    "popads.net", "propellerads.com", "onclicksuper.com", "adcash.com", "tynt.com",
+    "cloudflareinsights.com", "reliedhounder.com", "dtscdn.com", "pxdrop",
+)
+
+
+LEAGUE_PASS = "lpnba.akamaized.net"
+GAME_ID = re.compile(r"/(g\d{10}[a-z]{3}\d{6,8}[a-z]{2,3})", re.I)
+
+
+def describe(url, body):
+    """What kind of stream is this? League Pass, DRM system, PSSH, license URL."""
+    info = {"league_pass": LEAGUE_PASS in (url or ""), "game_id": None,
+            "widevine": False, "sample_aes": False, "key_uri": None, "license": None}
+    m = GAME_ID.search(url or "")
+    if m:
+        info["game_id"] = m.group(1)
+    body = body or ""
+    low = body.lower()
+    if "hls-wvpr" in (url or "").lower() or "widevine" in low:
+        info["widevine"] = True
+    if "method=sample-aes" in low:
+        info["sample_aes"] = True
+    for line in body.splitlines():
+        if line.startswith("#EXT-X-KEY") or line.startswith("#EXT-X-SESSION-KEY"):
+            kv = line.split(":", 1)[1] if ":" in line else ""
+            params = dict(p.strip().split("=", 1) for p in kv.split(",") if "=" in p)
+            uri = (params.get("URI") or "").strip('"')
+            info["key_uri"] = uri or info["key_uri"]
+            if uri.startswith("skd://") or "widevine" in (params.get("KEYFORMAT") or "").lower():
+                info["widevine"] = True
+                info["license"] = uri
+    return info
+
+def is_ad_host(url):
+    low = url.lower()
+    return any(h in low for h in BLOCK_HOSTS)
 M3U8 = re.compile(r"\.m3u8(\?|$)", re.I)
 KEY = re.compile(r"\.key(\?|$)|/key/", re.I)
 
@@ -52,6 +92,16 @@ def main():
             elif KEY.search(u):
                 keys.append(u)
 
+        # zero ads while cracking: abort ad/tracker hosts outright. The pre-roll
+        # bumper is one of them, and the manifest does not need any of it.
+        def _route(route):
+            if is_ad_host(route.request.url):
+                return route.abort()
+            return route.continue_()
+        try:
+            page.route("**/*", _route)
+        except Exception:
+            pass
         page.on("request", on_req)
         try:
             page.goto(args.url, wait_until="domcontentloaded", timeout=args.timeout * 1000)
@@ -112,6 +162,7 @@ def main():
                 or "sample-aes" in blob or "com.widevine" in blob)
 
     best = None
+    best_body = ""
     checked = []
     for url, ref in uniq[:5]:
         body = ""
@@ -126,14 +177,18 @@ def main():
         checked.append({"url": url[:90], "drm": drm, "bytes": len(body)})
         if not drm:
             best = (url, ref)
+            best_body = body
             break
         if best is None:
             best = (url, ref)          # all DRM so far: keep the first as fallback
+            best_body = body
     all_drm = bool(checked) and all(c.get("drm") for c in checked if "drm" in c)
+    stream_info = describe(best[0] if best else "", best_body)
     print(json.dumps({
         "ok": bool(best and best[0]),
         "m3u8": best[0] if best else None,
         "referer": (best[1] if best else "") or "",
+        "stream": stream_info,
         "source": src,
         "drm": all_drm,
         "checked": checked,

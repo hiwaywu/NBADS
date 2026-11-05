@@ -1164,3 +1164,43 @@ the harness waits for EOF.
 
 
 
+
+### 13.21 League Pass: where the good picture actually comes from
+
+Traced on a live game (Atlanta at Washington). The mirror's own player was not serving
+video at all; it was playing the official League Pass feed:
+
+```text
+lpnba.akamaized.net/live-pz/p/hls-wvpr/g0022600174atl1000477was/index.m3u8?…&csid=nba.com_live…
+```
+
+- `lpnba.akamaized.net` — League Pass delivery (Akamai)
+- `g0022600174atl…was` — the NBA's own game id
+- `hls-wvpr` — the **Widevine/PlayReady** rendition, i.e. the copy-protected stream a
+  subscriber gets
+
+So the mirrors are Unauth rebroadcasts: they authenticate somewhere and hand the result to
+visitors. `harvest.py` now reports that shape instead of guessing:
+
+```json
+"stream": {"league_pass": true, "game_id": "g0022600180cle1000468okc",
+           "widevine": true, "sample_aes": false, "key_uri": null, "license": null}
+```
+
+What the app does with it:
+- plain mirrors (e.g. `tims-001.sytes.net/.../nba-<id>.m3u8`, 200 with no Referer) → played in
+  our own player through the relay (measured: 1920x1080, readyState 4);
+- League Pass / `hls-wvpr` → `drm: true`, the page says so and uses the site's player page in
+  a real browser (the only thing with a CDM here).
+
+Why it cannot be decoded in-app as shipped: Widevine needs two things this machine does not
+have — an **entitlement** (a League Pass session/cookie that the license server accepts) and a
+**CDM** (a device blob, `device.wvd`, plus a licence exchange). With those, the pipeline would
+be: read `#EXT-X-SESSION-KEY`/PSSH → POST a signed challenge to the licence URL →
+`pywidevine` returns the content keys → decrypt each fragment (CENC `cbcs`/`cenc`, or
+`SAMPLE-AES` for CBC) → serve cleartext to our relay. Without them, the manifest is as far as
+any client gets, which is exactly what the trace shows.
+
+Practical alternative that needs no DRM work: pick mirrors whose re-encode is plain HLS. That
+is what `harvest.py` prefers — it checks each candidate manifest (`hls-wvpr`, `SAMPLE-AES`,
+`com.widevine`) and only plays the ones that are not protected.
