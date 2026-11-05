@@ -1116,6 +1116,63 @@ class Handler(BaseHTTPRequestHandler):
             HARVEST_CACHE[page] = (time.time(), payload)
             return self._send(200, json.dumps(payload))
 
+        if u.path == "/api/lp":
+            # League Pass ladder for one game: what renditions exist and what
+            # protects them. The manifest and the segments are fetchable (checked:
+            # a 702 KB 1080p fragment in 75 ms); the payload is SAMPLE-AES-CTR with
+            # a Widevine PSSH + PlayReady header, so decoding needs a licence.
+            page = (qs.get("u") or [""])[0]
+            if not page:
+                return self._send(400, '{"ok":false,"error":"missing u"}')
+            try:
+                h = HARVEST_CACHE.get(page)
+                if not h or time.time() - h[0] >= HARVEST_TTL:
+                    proc = subprocess.run([find_python(), HARVEST, page], cwd=ROOT,
+                                          capture_output=True, text=True, timeout=120)
+                    payload = json.loads((proc.stdout or "{}").strip() or "{}")
+                    HARVEST_CACHE[page] = (time.time(), payload)
+                    h = (time.time(), payload)
+                hp = h[1]
+                out = {"ok": bool(hp.get("ok")), "m3u8": hp.get("m3u8"),
+                       "stream": hp.get("stream", {}), "renditions": [],
+                       "protection": None, "playable": False}
+                master = next((a for a in (hp.get("alternates") or [])
+                               if "/index.m3u8" in a), None) or hp.get("m3u8")
+                if master:
+                    try:
+                        txt = fetch(master, timeout=15).read().decode("utf-8", "replace")
+                    except Exception:
+                        txt = ""
+                    for line in txt.splitlines():
+                        if line.startswith("#EXT-X-STREAM-INF"):
+                            kv = {}
+                            for part in line.split(":", 1)[1].split(","):
+                                if "=" in part:
+                                    a, b = part.split("=", 1)
+                                    kv[a.strip()] = b.strip().strip('"')
+                            res = kv.get("RESOLUTION", "")
+                            w = hgt = 0
+                            if "x" in res:
+                                try:
+                                    w, hgt = [int(x) for x in res.split("x")]
+                                except Exception:
+                                    pass
+                            bw = int(float(kv.get("BANDWIDTH", "0") or 0))
+                            out["renditions"].append({"w": w, "h": hgt,
+                                                      "mbps": round(bw / 1e6, 2),
+                                                      "codecs": kv.get("CODECS", "")})
+                        elif line.startswith("#EXT-X-SESSION-KEY") or line.startswith("#EXT-X-KEY"):
+                            if not out["protection"]:
+                                out["protection"] = line.split(":", 1)[1].split(",")[0]
+                            if "SAMPLE-AES-CTR" in line or "widevine" in line.lower():
+                                out["playable"] = False
+                    out["renditions"].sort(key=lambda r: -r["h"])
+                    out["best"] = out["renditions"][0] if out["renditions"] else None
+                    out["playable"] = bool(out["renditions"]) and not out["protection"]
+                return self._send(200, json.dumps(out))
+            except Exception as exc:
+                return self._send(200, json.dumps({"ok": False, "error": str(exc)[:200]}))
+
         if u.path == "/api/channels":
             return self._send(200, json.dumps({"channels": channels()}))
 
