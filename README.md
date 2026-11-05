@@ -205,6 +205,10 @@ Deep link straight into a channel: `adb shell am start -n com.nbahub.app/.MainAc
 
 ## Read this before changing anything
 
+**[docs/PROCESS.md](docs/PROCESS.md)** — the handover map: what the app is, every fix
+with its measured before/after, the mirror-chain crack, the League Pass boundary, the full
+verification harness and a catalogue of 21 traps. Read this one first.
+
 **[SOP_NBA_Stream_Hub.md](SOP_NBA_Stream_Hub.md)** â€” the full procedure, including the bugs
 that cost the most time:
 
