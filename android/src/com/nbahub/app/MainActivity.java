@@ -3,6 +3,7 @@ package com.nbahub.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -292,7 +293,23 @@ public class MainActivity extends Activity {
             });
         }
 
-        @JavascriptInterface
+                @JavascriptInterface
+        public void setFullscreen(final boolean on) {
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    if (on) {
+                        // a phone held normally is portrait, and a 16:9 picture in a
+                        // portrait window is a stamp. Fullscreen means landscape here.
+                        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                        goFullscreen();
+                    } else {
+                        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                        leaveFullscreen();
+                    }
+                }
+            });
+        }
+@JavascriptInterface
         public void openExternal(final String url) {
             if (url == null || url.length() == 0) return;
             runOnUiThread(new Runnable() {
@@ -433,7 +450,21 @@ public class MainActivity extends Activity {
                         | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
-    @Override
+        @SuppressWarnings("deprecation")
+    private void leaveFullscreen() {
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(true);
+            WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) c.show(WindowInsets.Type.systemBars());
+        }
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+        if (root != null) root.setFitsSystemWindows(true);
+        if (web != null) web.setFitsSystemWindows(true);
+    }
+@Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) goFullscreen();

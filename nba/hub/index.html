@@ -939,9 +939,15 @@ function exitFullscreen(){
   if (document.exitFullscreen) { document.exitFullscreen().catch(() => {}); return; }
   if (document.webkitExitFullscreen) { document.webkitExitFullscreen(); return; }
   if (v && v.webkitExitFullscreen) v.webkitExitFullscreen();
+  tellAppFullscreen(false);
+}
+// In the app, fullscreen also means landscape: the WebView cannot rotate itself,
+// so hand the decision to MainActivity (Hub.setFullscreen) on every change.
+function tellAppFullscreen(on){
+  try { if (window.Hub && Hub.setFullscreen) Hub.setFullscreen(!!on); } catch(e){}
 }
 $('#fs').onclick = () => {
-  if (isFullscreen()){ exitFullscreen(); return; }
+  tellAppFullscreen(true); if (isFullscreen()){ exitFullscreen(); return; }
   // Fullscreen the *container*, never the raw video: our CSS then owns the
   // geometry (object-fit:contain => letterbox), on desktop and in a WebView
   // alike. The old Android path called video.webkitEnterFullscreen(), which
@@ -966,6 +972,7 @@ $('#fsexit').onclick = () => exitFullscreen();
   document.addEventListener(ev, function(){
     const b = $('#fs');
     if (b) b.textContent = isFullscreen() ? 'exit full' : 'fullscreen';
+    tellAppFullscreen(isFullscreen());
   });
 });
 $('#low').onclick = () => {
