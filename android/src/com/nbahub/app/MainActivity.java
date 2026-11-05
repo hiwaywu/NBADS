@@ -58,7 +58,11 @@ public class MainActivity extends Activity {
             "histats.com", "dtscout.com", "sharethis.com", "crwdcntrl.net",
             "lijit.com", "intentiq.com", "mrktmtrcs.net", "popads.net",
             "propellerads.com", "onclicksuper.com", "adcash.com", "tynt.com",
-            "cloudflareinsights.com", "reliedhounder.com", "dtscdn.com"
+            "cloudflareinsights.com", "reliedhounder.com", "dtscdn.com",
+            "trend48.st", "adcash", "popads", "popcash", "adsterra", "highperformance",
+            "hilltopads", "exoclick", "tsyndicate", "profitableratecpm", "onclickalgo",
+            "adnium", "clickadu", "galaksion", "revcontent", "taboola", "outbrain",
+            "zedo", "mgid", "trafficjunky", "juicyads", "adspyglass", "ad-maven"
     };
 
 
