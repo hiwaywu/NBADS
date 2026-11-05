@@ -12,6 +12,12 @@ $out  = Join-Path $root 'build'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Get-ChildItem $out -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path "$out\gen", "$out\classes", "$out\dex" | Out-Null
+Get-ChildItem $out -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'assets' } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# the standalone app carries the PC page, hls.js and the channel list itself
+New-Item -ItemType Directory -Force -Path "$out\assets" | Out-Null
+$repo = Split-Path -Parent $root
+Copy-Item "$repo\nba\hub\index.html", "$repo\nba\hub\hls.min.js", "$repo\nba\feeds.txt" "$out\assets\" -Force
 
 Write-Host '[1/6] compiling resources' -ForegroundColor Cyan
 & "$bt\aapt2.exe" compile --dir "$root\res" -o "$out\res.zip"
@@ -19,16 +25,16 @@ if ($LASTEXITCODE -ne 0) { throw 'aapt2 compile failed' }
 
 Write-Host '[2/6] linking resources + manifest' -ForegroundColor Cyan
 & "$bt\aapt2.exe" link -o "$out\base.apk" -I $jar `
-    --manifest "$root\AndroidManifest.xml" -R "$out\res.zip" `
+    --manifest "$root\AndroidManifest.xml" -R "$out\res.zip" -A "$out\assets" `
     --java "$out\gen" --auto-add-overlay `
     --min-sdk-version 24 --target-sdk-version 34 `
-    --version-code 3 --version-name 1.3
+    --version-code 4 --version-name 2.0
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
 Write-Host '[3/6] compiling java' -ForegroundColor Cyan
 $srcs = @(Get-ChildItem "$root\src" -Recurse -Filter *.java | ForEach-Object { $_.FullName })
 $srcs += @(Get-ChildItem "$out\gen" -Recurse -Filter *.java | ForEach-Object { $_.FullName })
-& javac -source 8 -target 8 -nowarn -bootclasspath $jar -classpath $jar -d "$out\classes" $srcs
+& javac -source 8 -target 8 -nowarn -encoding UTF-8 -bootclasspath $jar -classpath $jar -d "$out\classes" $srcs
 if ($LASTEXITCODE -ne 0) { throw 'javac failed' }
 
 Write-Host '[4/6] dexing' -ForegroundColor Cyan

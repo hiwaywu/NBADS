@@ -197,6 +197,31 @@
     #unmute{top:10px;bottom:auto;transform:translateX(-50%);left:50%;padding:8px 14px;font-size:13px}
     #toast{bottom:auto;top:calc(46vh + 8px);font-size:12.5px}
   }
+
+  /* ---------------- Galaxy Z Fold inner screen ----------------
+     Inner display 2184x1968 at ~2.34 dppx: 842 x 934 css px upright, 934 x 842
+     turned. Upright it gets the phone layout, but with room for a full-width
+     picture. Turned, it is wider than 900 and gets the two-pane layout -- whose
+     one-line control bar did not fit in the 582 px beside the list: the page grew
+     to 1204 px, the WebView zoomed out and live / fullscreen fell off the edge.
+     The bar now wraps at every width, and touch screens get finger-sized rows. */
+  #bar{flex-wrap:wrap;height:auto;min-height:34px;row-gap:4px;padding-top:4px;padding-bottom:4px}
+  #bar .right{flex-wrap:wrap}
+  @media (min-width: 701px) and (max-width: 900px){
+    #stage{max-height:min(56vh, calc(100vw * 9 / 16))}
+    #toast{top:calc(min(56vh, 100vw * 9 / 16) + 8px)}
+  }
+  @media (pointer: coarse) and (min-width: 901px){
+    #side{width:320px;min-width:320px}
+    #bar{min-height:44px;padding:6px 10px;row-gap:6px}
+    #bar .title{max-width:100%;flex:1 1 100%;font-size:12.5px}
+    #bar .right{margin-left:0;gap:6px}
+    #bar button{padding:8px 12px;font-size:12.5px}
+    #datebar button{width:38px;height:38px;font-size:17px}
+    #search{padding:10px 12px;font-size:14px}
+    .row{padding:12px 14px}
+    .row .nm{font-size:14px}
+  }
 </style>
 </head>
 <body>
@@ -223,7 +248,7 @@
       <p><b>NBA TV</b> plays right here at full quality, buffered locally.<br>
          A <b>game</b> opens its stream in its own player window.</p>
     </div>
-    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock" allow="autoplay; fullscreen; encrypted-media" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
+    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock" allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
     <button id="reloadStream" style="display:none;position:absolute;top:10px;right:12px;z-index:6;background:rgba(20,22,26,.86);border:1px solid #2c3038;color:#c9cdd6;border-radius:7px;padding:6px 11px;font:12px -apple-system,Segoe UI,sans-serif;cursor:pointer;opacity:.5">&#8635; reload stream</button>
     <div id="spinner"><div class="ring"></div><span id="spintext">working...</span></div>
     <div id="unmute">tap for sound</div>
@@ -257,7 +282,11 @@ const IN_APP = /NBAHubApp/.test(navigator.userAgent);
 // exposes MediaKeys at all; Android WebView frequently ships without it, which
 // is the black-rectangle case. Know the answer before we navigate.
 const CAN_DRM = (typeof navigator.requestMediaKeySystemAccess === 'function') && window.isSecureContext;
-const APP = { diag: null };              // optional native bridge (Hub.isApp)
+const APP = { diag: null };
+// The standalone phone app opens a game's own player page inside the app (its
+// WebView grants Widevine). It cannot frame the player in this page: the player
+// hosts answer "not available here" to any site that is not theirs.
+const STANDALONE = IN_APP && !!(window.Hub && Hub.standalone && Hub.standalone());
 let channels = [], games = [], dates = [], curDate = '', hls = null, relayBase = '', relayPort = 0;
 let season = null;   // {start, end}: the schedule is known this far, so an empty day is real
 let lowMode = false, lastChannel = null, srcDown = [], lastChecked = '';
@@ -362,7 +391,7 @@ function render(){
   gs.forEach(g => {
     const live = g.state === 'in';
     const done = g.state === 'post';
-    const handoff = IS_MOBILE && (!window.Hub || !CAN_DRM);   // phone: DRM needs a real browser
+    const handoff = IS_MOBILE && !STANDALONE;   // a phone browser tab: games go to the site
     let meta, badge, cls;
     if (done) { meta = (g.time ? g.time + ' - ' : '') + 'final'; badge = 'final'; cls = ''; }
     else if (live) { meta = 'live now' + (handoff ? ' \u00b7 opens in browser' : ''); badge = 'live'; cls = 'live'; }
@@ -403,6 +432,9 @@ async function loadGames(){
 }
 
 async function playChannel(c, byMirror){
+  // what is on screen now: a mirror that refuses to start must not take the
+  // title (or the failover position) from the stream that is still playing
+  const prev = { ch: lastChannel, idx: mirrorIdx, title: $('#nowTitle').textContent };
   lastChannel = c;
   const idx = channels.findIndex(x => x.url === c.url);
   if (!byMirror) { mirrorTried.clear(); mirrorReason = ''; }
@@ -428,6 +460,10 @@ async function playChannel(c, byMirror){
   } catch(e){
     toast('could not start that channel: ' + e.message, 4200);
     setSpin(false);
+    if (hls && prev.ch){
+      if (byMirror) mirrorTried.add(c.url);
+      lastChannel = prev.ch; mirrorIdx = prev.idx; $('#nowTitle').textContent = prev.title;
+    }
     // a dead mirror is also a reason to move on, not just to sit there
     if (!byMirror) return mirrorFail('could not start: ' + e.message);
   }
@@ -444,7 +480,7 @@ async function playChannel(c, byMirror){
 // 15 s, and only while the channel list has an untried entry. A manual click
 // resets the whole thing, so it never fights the user.
 let mirrorIdx = -1, mirrorTried = new Set(), mirrorLastSwitch = 0;
-let seekGraceUntil = 0;
+let seekGraceUntil = 0, attachAt = 0;
 let mirrorReason = '', mirrorStalls = [];
 let mirrorLastT = -1, mirrorLastMove = Date.now();
 
@@ -487,6 +523,9 @@ setInterval(() => {
 }, 1000);
 
 function noteStall(){
+  // startup and the jump to the live edge raise 'waiting' by design -- only
+  // buffering once the picture is running says anything about the mirror
+  if (Date.now() - attachAt < 12000 || v.seeking || Date.now() < seekGraceUntil) return;
   mirrorStalls.push(Date.now());
   mirrorStalls = mirrorStalls.filter(t => Date.now() - t < 60000);
   if (mirrorStalls.length >= 3) { mirrorStalls = []; mirrorFail('repeated buffering'); }
@@ -547,6 +586,7 @@ function attach(url){
   $('#idle').style.display = 'none';
   document.body.classList.add('playing');
   relayBase = url.replace(/\/live\.m3u8.*$/, '');
+  attachAt = Date.now();
   if (hls){ hls.destroy(); hls = null; }
   v.removeAttribute('src');
   setSpin(true, 'starting the stream...');
@@ -782,29 +822,27 @@ async function watchGame(g){
   $('#pillQ').style.display = 'none';
   $('#pillBuf').style.display = 'none';
 
-  // First choice on every device: drive the mirror chain in a real browser, take
-  // the HLS manifest its own player asked for, and play THAT in our player through
-  // our relay. It is plain (unencrypted) HLS, so no iframe, no ads, no DRM and no
-  // browser hand-off. Falls through to the old paths if the harvest comes up dry.
-  // Stop the channel first: a game switch is not a channel stall, and the mirror
-  // watchdog must not rotate channels while the harvest runs.
-  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
-  lastChannel = null;
-  try {
-    const h = await fetch('/api/harvest?u=' + encodeURIComponent(g.url)).then(r => r.json());
-    if (h && h.ok && h.m3u8 && !h.drm){
-      document.body.classList.remove('iframeMode');
-      toast('got the media playlist - playing it here', 2600);
-      setSpin(true, 'buffering the game locally...');
-      await playChannel({ name: g.name, url: h.m3u8 });
-      return;
-    }
-    if (h && h.drm){
-      toast('this mirror is Widevine - opening the player instead', 3600);
-    } else {
-      toast('no manifest from that page - using the old route', 3000);
-    }
-  } catch(e){}
+  // PC hub only: drive the mirror chain in a real browser, take the media playlist
+  // its own player asks for, and play THAT here through the relay. The standalone
+  // Android build has no /api/harvest (no Playwright inside the APK), so a 404 just
+  // falls through to the paths below.
+  if (!STANDALONE && !IS_MOBILE){
+    try {
+      const hr = await fetch('/api/harvest?u=' + encodeURIComponent(g.url));
+      if (hr.ok){
+        const h = await hr.json();
+        if (h && h.ok && h.m3u8 && !h.drm){
+          if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+          lastChannel = null;
+          document.body.classList.remove('iframeMode');
+          toast('got the media playlist - playing it here', 2600);
+          await playChannel({ name: g.name, url: h.m3u8 });
+          return;
+        }
+        if (h && h.drm) toast('this mirror is Widevine - using the player page', 3000);
+      }
+    } catch(e){}
+  }
 
   // The phone cannot play these feeds inside this page: they are Widevine and
   // EME refuses a non-secure origin (http://192.168.x.x is not one), so the
@@ -814,7 +852,9 @@ async function watchGame(g){
     let j = null;
     try { j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json()); } catch(e){}
     setSpin(false);
-    const target = (j && (j.open || j.frame)) || g.url;
+    // standalone: the "Main N" page itself, which embeds its player the way the
+    // player host allows; the frame alone refuses to play outside its own sites
+    const target = (j && (STANDALONE ? (j.browser || j.open) : (j.open || j.frame))) || g.url;
     if (!j || !j.ok){
       const go = window.confirm('No feed answered the probe this time.\n\nOpen the stream page anyway?\n' + target);
       if (!go) return;
@@ -825,8 +865,16 @@ async function watchGame(g){
     hideUnmute();
     // Widevine cannot be decrypted by a webview without EME; Chrome on the same
     // phone can. Hand the link over instead of showing a black rectangle.
-    if (IN_APP && !CAN_DRM && window.Hub && Hub.openExternal){
-      toast('this webview has no DRM support \u2014 opening in your browser', 4200);
+    if (STANDALONE && Hub.openInternal){
+      if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
+      try { v.pause(); } catch(e){}
+      toast('opening the game player \u2014 \u2302 or Back returns here', 3200);
+      Hub.openInternal(target);
+      return;
+    }
+    // the PC-hub app (1.x) on an http://192.168.x.x origin has no EME at all
+    if (IN_APP && window.Hub && Hub.openExternal){
+      toast('opening the game in your browser', 3200);
       Hub.openExternal(target);
       return;
     }
@@ -916,7 +964,12 @@ $('#low').onclick = () => {
   toast(lowMode ? 'low delay on - ~20s behind live, less cushion' : 'low delay off - bigger cushion, smoother', 3000);
   if (lastChannel) playChannel(lastChannel);
 };
-$('#reload').onclick = () => { dates = []; boot(); };$('#freezeBtn').onclick = () => reportFreeze();
+$('#reload').onclick = () => {
+  dates = [];
+  // the phone app re-reads the stream sites and feeds.txt on this; the PC hub
+  // answers 404 and its own 4-minute cache applies -- either way, reload
+  fetch('/api/refresh?_=' + Date.now()).catch(() => {}).then(() => boot());
+};$('#freezeBtn').onclick = () => reportFreeze();
 $('#live').onclick = () => seekLive();
 $('#unmute').onclick = function(){ v.muted = false; v.play().catch(()=>{}); hideUnmute(); };
 $('#reloadStream').onclick = () => {
