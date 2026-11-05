@@ -216,7 +216,23 @@ public class MainActivity extends Activity {
                 Uri u = req.getUrl();
                 String scheme = u == null ? null : u.getScheme();
                 if (scheme == null) return false;
-                if (scheme.startsWith("http")) return false;
+                if (scheme.startsWith("http")) {
+                    // The page we opened may move around inside its own hosts, and our hub is
+                    // always fine. Anything else is an ad landing page wearing the costume of a
+                    // stream, and it must not take the screen - that is what made the app look
+                    // like it "left" and showed a wall of ads.
+                    String host = u.getHost() == null ? "" : u.getHost().toLowerCase();
+                    String cur = view.getUrl() == null ? "" : view.getUrl();
+                    String curHost = "";
+                    try { curHost = Uri.parse(cur).getHost(); } catch (Exception e) { }
+                    if (curHost == null) curHost = "";
+                    if (isHome(u.toString())) return false;
+                    if (host.equalsIgnoreCase(curHost)) return false;
+                    if (host.contains("foxiy") || host.contains("methstreams")
+                            || host.contains("methfoxiy") || host.contains("nbahub")) return false;
+                    Log.i(TAG, "nav blocked: " + u);
+                    return true;
+                }
                 try {
                     startActivity(new Intent(Intent.ACTION_VIEW, u));
                 } catch (Exception ignored) {
