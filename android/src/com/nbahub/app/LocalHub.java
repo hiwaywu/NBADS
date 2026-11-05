@@ -463,19 +463,30 @@ final class LocalHub {
             List<String> links = linksFor(page);
             if (p.equals("/api/candidates")) {
                 JSONArray cs = new JSONArray();
-                for (String l : links) cs.put(new JSONObject().put("url", l).put("ok", false).put("h", 0).put("frame", ""));
+                for (String l : links) {
+                    String f = playerFrame(l);
+                    cs.put(new JSONObject().put("url", l).put("ok", f != null).put("h", 0).put("frame", f == null ? "" : f));
+                }
                 json(out, r, new JSONObject().put("ok", true).put("candidates", cs));
                 return;
             }
-            // no headless browser on a phone: the first player link is the best
-            // guess, and the page itself if the site lists none
-            String target = links.isEmpty() ? page : links.get(0);
+            // no headless browser on a phone: take the first "Main N" link whose
+            // page names a player frame in plain HTML. The app opens that page
+            // itself -- the player host refuses to play framed by anyone else.
+            String main = links.isEmpty() ? page : links.get(0);
+            String frame = null;
+            for (String l : links) {
+                frame = playerFrame(l);
+                if (frame != null) { main = l; break; }
+            }
             json(out, r, new JSONObject()
-                    .put("ok", !links.isEmpty())
-                    .put("frame", target).put("open", target)
-                    .put("source", target).put("event", page)
+                    .put("ok", frame != null)
+                    .put("frame", frame != null ? frame : main)
+                    .put("open", frame != null ? frame : main)
+                    .put("browser", main)
+                    .put("source", main).put("event", page)
                     .put("links", new JSONArray(links))
-                    .put("probe", new JSONObject().put("ok", !links.isEmpty()).put("note", "not probed on the phone")));
+                    .put("probe", new JSONObject().put("ok", frame != null).put("note", "frame read from the page, not probed")));
             return;
         }
         if (p.equals("/api/health")) {
@@ -499,6 +510,40 @@ final class LocalHub {
             return;
         }
         send(out, r, 404, "text/plain", bytes("not found"), null);
+    }
+
+    private final Map<String, Object[]> frames = new HashMap<String, Object[]>();
+    private static final Pattern STREAM_IFRAME = Pattern.compile(
+            "<iframe[^>]*\\bid=[\"']streamIframe[\"'][^>]*>",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern SRC = Pattern.compile("\\bsrc=[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * The player frame a "Main N" page embeds (iframe#streamIframe), read from
+     * its plain HTML -- the same request a browser makes for that page, nothing
+     * spoofed. Null when the page does not name one.
+     */
+    private String playerFrame(String mainPage) {
+        synchronized (frames) {
+            Object[] hit = frames.get(mainPage);
+            if (hit != null && System.currentTimeMillis() - (Long) hit[0] < 600000) return (String) hit[1];
+        }
+        String found = null;
+        try {
+            Http.Resp resp = Http.get(mainPage, 15000, null);
+            Matcher m = STREAM_IFRAME.matcher(resp.text());
+            if (m.find()) {
+                Matcher sm = SRC.matcher(m.group(0));
+                if (sm.find()) {
+                    String u = Http.join(resp.finalUrl, sm.group(1).replace("&amp;", "&"));
+                    if (u.startsWith("https://")) found = u;     // EME needs a secure frame
+                }
+            }
+        } catch (Exception e) {
+            Log.i(TAG, "no player frame on " + mainPage + ": " + e.getMessage());
+        }
+        synchronized (frames) { frames.put(mainPage, new Object[]{System.currentTimeMillis(), found}); }
+        return found;
     }
 
     private List<String> linksFor(String page) {

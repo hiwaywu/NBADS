@@ -39,8 +39,9 @@ import android.widget.Toast;
  *
  * What the shell adds on top of the page:
  *   - video fullscreen through onShowCustomView, so both fullscreen buttons work
- *   - games handed to Chrome/Firefox (Widevine needs a real browser), with a
- *     way back after a game page was opened in-app
+ *   - games open in-app on the site's own player page (Widevine granted to it,
+ *     popups refused), with the home chip to come back and a Chrome chip if a
+ *     stream will not show a picture here
  *   - the page's JS console mirrored into logcat
  */
 public class MainActivity extends Activity {
@@ -52,6 +53,7 @@ public class MainActivity extends Activity {
     private WebView web;
     private FrameLayout root;
     private TextView chip;
+    private TextView chromeChip;
 
     private View fullView;
     private WebChromeClient.CustomViewCallback fullCallback;
@@ -92,7 +94,9 @@ public class MainActivity extends Activity {
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setJavaScriptCanOpenWindowsAutomatically(false);
-        s.setSupportMultipleWindows(false);
+        // true + onCreateWindow() refusing = popups are dropped. With false, a
+        // window.open() from an ad on a game page would replace the page itself.
+        s.setSupportMultipleWindows(true);
         s.setUserAgentString(s.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION);
 
         WebView.setWebContentsDebuggingEnabled(true);   // chrome://inspect from a PC, if ever needed
@@ -107,12 +111,19 @@ public class MainActivity extends Activity {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 web.setVisibility(View.GONE);
                 chip.setVisibility(View.GONE);
+                chromeChip.setVisibility(View.GONE);
                 goFullscreen();
             }
 
             @Override
             public void onHideCustomView() {
                 leaveCustomView();
+            }
+
+            @Override
+            public boolean onCreateWindow(WebView view, boolean dialog, boolean userGesture, android.os.Message msg) {
+                Log.i(TAG, "popup blocked");
+                return false;
             }
 
             @Override
@@ -203,6 +214,34 @@ public class MainActivity extends Activity {
         clp.setMargins(0, 0, 4, 0);
         root.addView(chip, clp);
 
+        // the escape hatch for a game page: the same page in Chrome
+        chromeChip = new TextView(this);
+        chromeChip.setText("Chrome");
+        chromeChip.setTextSize(11);
+        chromeChip.setTextColor(Color.parseColor("#d9ffe8"));
+        chromeChip.setGravity(Gravity.CENTER);
+        chromeChip.setPadding(14, 10, 14, 10);
+        GradientDrawable bg2 = new GradientDrawable();
+        bg2.setColor(Color.parseColor("#66162a1f"));
+        bg2.setCornerRadius(30f);
+        bg2.setStroke(1, Color.parseColor("#552c4a39"));
+        chromeChip.setBackground(bg2);
+        chromeChip.setAlpha(0.30f);
+        chromeChip.setVisibility(View.GONE);
+        chromeChip.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                String cur = web == null ? null : web.getUrl();
+                if (cur == null || isHome(cur)) return;
+                goHome();                 // stop the in-app copy: one stream, not two
+                openInBrowser(cur);
+            }
+        });
+        FrameLayout.LayoutParams cclp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        cclp.setMargins(0, 150, 4, 0);
+        root.addView(chromeChip, cclp);
+
         setContentView(root);
         goFullscreen();
         openFromIntent(getIntent());
@@ -263,7 +302,9 @@ public class MainActivity extends Activity {
     private void updateChip() {
         if (chip == null || web == null) return;
         String cur = web.getUrl();
-        chip.setVisibility(cur != null && cur.startsWith("http") && !isHome(cur) ? View.VISIBLE : View.GONE);
+        boolean away = cur != null && cur.startsWith("http") && !isHome(cur);
+        chip.setVisibility(away ? View.VISIBLE : View.GONE);
+        if (chromeChip != null) chromeChip.setVisibility(away ? View.VISIBLE : View.GONE);
     }
 
     private void leaveCustomView() {

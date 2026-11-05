@@ -248,7 +248,7 @@
       <p><b>NBA TV</b> plays right here at full quality, buffered locally.<br>
          A <b>game</b> opens its stream in its own player window.</p>
     </div>
-    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock" allow="autoplay; fullscreen; encrypted-media" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
+    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock" allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
     <button id="reloadStream" style="display:none;position:absolute;top:10px;right:12px;z-index:6;background:rgba(20,22,26,.86);border:1px solid #2c3038;color:#c9cdd6;border-radius:7px;padding:6px 11px;font:12px -apple-system,Segoe UI,sans-serif;cursor:pointer;opacity:.5">&#8635; reload stream</button>
     <div id="spinner"><div class="ring"></div><span id="spintext">working...</span></div>
     <div id="unmute">tap for sound</div>
@@ -282,7 +282,11 @@ const IN_APP = /NBAHubApp/.test(navigator.userAgent);
 // exposes MediaKeys at all; Android WebView frequently ships without it, which
 // is the black-rectangle case. Know the answer before we navigate.
 const CAN_DRM = (typeof navigator.requestMediaKeySystemAccess === 'function') && window.isSecureContext;
-const APP = { diag: null };              // optional native bridge (Hub.isApp)
+const APP = { diag: null };
+// The standalone phone app opens a game's own player page inside the app (its
+// WebView grants Widevine). It cannot frame the player in this page: the player
+// hosts answer "not available here" to any site that is not theirs.
+const STANDALONE = IN_APP && !!(window.Hub && Hub.standalone && Hub.standalone());
 let channels = [], games = [], dates = [], curDate = '', hls = null, relayBase = '', relayPort = 0;
 let season = null;   // {start, end}: the schedule is known this far, so an empty day is real
 let lowMode = false, lastChannel = null, srcDown = [], lastChecked = '';
@@ -387,7 +391,7 @@ function render(){
   gs.forEach(g => {
     const live = g.state === 'in';
     const done = g.state === 'post';
-    const handoff = IS_MOBILE;   // phone: Widevine games play in a real browser
+    const handoff = IS_MOBILE && !STANDALONE;   // a phone browser tab: games go to the site
     let meta, badge, cls;
     if (done) { meta = (g.time ? g.time + ' - ' : '') + 'final'; badge = 'final'; cls = ''; }
     else if (live) { meta = 'live now' + (handoff ? ' \u00b7 opens in browser' : ''); badge = 'live'; cls = 'live'; }
@@ -826,7 +830,9 @@ async function watchGame(g){
     let j = null;
     try { j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json()); } catch(e){}
     setSpin(false);
-    const target = (j && (j.open || j.frame)) || g.url;
+    // standalone: the "Main N" page itself, which embeds its player the way the
+    // player host allows; the frame alone refuses to play outside its own sites
+    const target = (j && (STANDALONE ? (j.browser || j.open) : (j.open || j.frame))) || g.url;
     if (!j || !j.ok){
       const go = window.confirm('No feed answered the probe this time.\n\nOpen the stream page anyway?\n' + target);
       if (!go) return;
@@ -837,10 +843,14 @@ async function watchGame(g){
     hideUnmute();
     // Widevine cannot be decrypted by a webview without EME; Chrome on the same
     // phone can. Hand the link over instead of showing a black rectangle.
-    // The standalone app serves this page from 127.0.0.1, which *is* a secure
-    // context, so CAN_DRM can come out true -- but the stream sites are full of
-    // popups and the WebView's Widevine is not reliable. Chrome is the known-good
-    // path, so the app always hands games over.
+    if (STANDALONE && Hub.openInternal){
+      if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
+      try { v.pause(); } catch(e){}
+      toast('opening the game player \u2014 \u2302 or Back returns here', 3200);
+      Hub.openInternal(target);
+      return;
+    }
+    // the PC-hub app (1.x) on an http://192.168.x.x origin has no EME at all
     if (IN_APP && window.Hub && Hub.openExternal){
       toast('opening the game in your browser', 3200);
       Hub.openExternal(target);

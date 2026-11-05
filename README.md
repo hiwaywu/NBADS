@@ -164,10 +164,19 @@ Better than the 1.x relay, on both counts it used to drop:
 `reload list`). Fix a dead mirror by editing that file on `main` — no APK rebuild. An optional
 third column sets a Referer for feeds that need one: `NAME | URL | https://referer/`.
 
-Games still open in the phone's browser (Chrome first, then Firefox): they are Widevine, and
-the WebView is not a reliable place to decrypt them. That is a DRM limit, not a PC one. On the
-phone, a game opens its first `Main N` player link without probing it — there is no headless
-browser to probe with.
+**Games play inside the app** on the site's own player page: the app opens the game's
+`Main N` page in its WebView, grants that page Widevine, and refuses its popups. `⌂` (or Back)
+returns to the list; the `Chrome` chip under it reopens the same page in Chrome if a stream
+shows no picture in the WebView. Two things it deliberately does **not** do:
+
+- play a game in *our* hls.js player — the feeds are Widevine (`hls-wvpr`, see SOP §2.4), and
+  extracting or decrypting them is not something this project does
+- frame the player inside our page — the player hosts check who embeds them and answer
+  "This stream is not available here" to anyone but their own sites; getting round that would
+  mean faking the embedder, so the app opens their page as-is instead
+
+On the phone, a game opens its first `Main N` page whose HTML names a player frame, without
+probing it — there is no headless browser to probe with.
 
 Data use: the relay pulls the stream's own bitrate (~5 Mbps for 1080p, ~2.2 GB/hour) plus a
 short burst to fill the buffer. It stops by itself 3 minutes after the player stops asking.
