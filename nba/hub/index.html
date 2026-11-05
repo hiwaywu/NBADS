@@ -793,7 +793,7 @@ async function polTick(){
 
 function polSwitch(c){
   const pf = $('#pf');
-  pf.src = '/watch?u=' + encodeURIComponent(c.frame) + '&_=' + Date.now();
+  pf.src = '/play?u=' + encodeURIComponent(c.frame) + '&_=' + Date.now();
   $('#nowTitle').textContent = (pol.game ? pol.game.name : '') + '  (switched)';
   toast('switched feed', 2500);
   polReset(pol.game, c.h);
@@ -897,7 +897,7 @@ async function watchGame(g){
     document.body.classList.remove('playing');
     document.body.classList.add('iframeMode');
     pf.style.display = 'block';
-    pf.src = '/watch?u=' + encodeURIComponent(target) + '&_=' + Date.now();
+    pf.src = '/play?u=' + encodeURIComponent(target) + '&_=' + Date.now();
     const srcPill = $('#pillSrc');
     if (srcPill){
       let h = ''; try { h = new URL(target).hostname; } catch(e){}

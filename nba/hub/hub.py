@@ -787,6 +787,62 @@ PATCH_JS = """
 """
 
 
+AUTOPLAY_JS = """
+<script id="nbaautoplay">
+(function () {
+  // The click that opened this page is the gesture, but it does not travel into a
+  // new document, so the player sits on its poster. Mute it, click the overlay and
+  // call play() again over the first seconds until the picture actually moves.
+  var tries = 0, kicked = false;
+  function kick() {
+    tries++;
+    var v = document.querySelector('video');
+    if (v) {
+      try { v.muted = true; } catch (e) {}
+      try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
+      try { v.click(); } catch (e) {}
+    }
+    var sels = ['.play', '.play-button', '.btn-play', '[class*="play"]', '[id*="play"]',
+                '.overlay', '.poster', '[class*="poster"]', 'button'];
+    for (var i = 0; i < sels.length; i++) {
+      var els = document.querySelectorAll(sels[i]);
+      for (var j = 0; j < els.length && j < 4; j++) {
+        var el = els[j];
+        if (!el || el.disabled) continue;
+        try { el.click(); } catch (e) {}
+      }
+    }
+    if (v && v.readyState >= 3 && !v.paused) {
+      kicked = true;
+      try { document.documentElement.setAttribute('data-nbaautoplay', 'playing'); } catch (e) {}
+      try {
+        var b = document.createElement('div');
+        b.textContent = 'muted - tap the picture for sound';
+        b.style.cssText = 'position:fixed;left:12px;top:12px;z-index:2147483647;'
+          + 'background:rgba(20,22,26,.9);border:1px solid #2c3038;color:#c9cdd6;'
+          + 'border-radius:8px;padding:8px 12px;font:13px -apple-system,Segoe UI,sans-serif;'
+          + 'pointer-events:none';
+        document.body.appendChild(b);
+        setTimeout(function () { b.remove(); }, 6000);
+      } catch (e) {}
+      try {
+        document.addEventListener('click', function once() {
+          try { var vv = document.querySelector('video'); if (vv) { vv.muted = false; vv.play(); } } catch (e) {}
+          document.removeEventListener('click', once);
+        });
+      } catch (e) {}
+    }
+    if (tries < 20 && !kicked) setTimeout(kick, 900);
+  }
+  try { document.documentElement.setAttribute('data-nbaautoplay', 'armed'); } catch (e) {}
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { setTimeout(kick, 400); });
+  } else { setTimeout(kick, 400); }
+})();
+</script>
+"""
+
+
 def proxy_page(url):
     req = urllib.request.Request(url)
     req.add_header("User-Agent", UA)
@@ -798,7 +854,7 @@ def proxy_page(url):
 
     p = urllib.parse.urlparse(url)
     base = f"{p.scheme}://{p.netloc}/"
-    inject = f'<base href="{base}">' + HIDE_CSS + PATCH_JS
+    inject = f'<base href="{base}">' + HIDE_CSS + PATCH_JS + AUTOPLAY_JS
 
     # never let their CSP or frame rules apply to our copy
     raw = re.sub(r'(?is)<meta[^>]+http-equiv=["\']?(content-security-policy)["\']?[^>]*>', "", raw)

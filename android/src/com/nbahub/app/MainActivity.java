@@ -154,6 +154,11 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 updateChip();
+                // A game tap navigates to the site's own player page. Its poster /
+                // overlay waits for a click, and the tap that brought us here does not
+                // count inside the new document, so start it ourselves: mute, click the
+                // overlay, play, and keep nudging for a few seconds.
+                if (url != null && !isHome(url)) kickPlayback(view);
             }
 
             @Override
@@ -245,6 +250,36 @@ public class MainActivity extends Activity {
         setContentView(root);
         goFullscreen();
         openFromIntent(getIntent());
+    }
+
+    /** Start the player on a page we did not write: mute, click, play, repeat. */
+    private void kickPlayback(final WebView view) {
+        final String js = "(function(){var n=0,k=false;function go(){n++;"
+            + "var v=document.querySelector('video');"
+            + "if(v){try{v.muted=true;}catch(e){}"
+            + "try{var p=v.play();if(p&&p.catch)p.catch(function(){});}catch(e){}"
+            + "try{v.click();}catch(e){}}"
+            + "var s=['.play','.play-button','.btn-play','[class*=play]','[id*=play]','.overlay','.poster','button'];"
+            + "for(var i=0;i<s.length;i++){var e=document.querySelectorAll(s[i]);"
+            + "for(var j=0;j<e.length&&j<4;j++){try{if(!e[j].disabled)e[j].click();}catch(x){}}}"
+            + "if(v&&v.readyState>=3&&!v.paused){k=true;"
+            + "document.documentElement.setAttribute('data-nbaautoplay','playing');"
+            + "try{var b=document.createElement('div');"
+            + "b.textContent='muted - tap the picture for sound';"
+            + "b.style.cssText='position:fixed;left:12px;top:12px;z-index:2147483647;"
+            + "background:rgba(20,22,26,.9);border:1px solid #2c3038;color:#c9cdd6;"
+            + "border-radius:8px;padding:8px 12px;font:13px sans-serif;pointer-events:none';"
+            + "document.body.appendChild(b);setTimeout(function(){b.remove();},6000);}catch(e){}"
+            + "document.addEventListener('click',function once(){"
+            + "try{var vv=document.querySelector('video');if(vv){vv.muted=false;vv.play();}}catch(e){}"
+            + "document.removeEventListener('click',once);});}"
+            + "if(n<20&&!k)setTimeout(go,900);}"
+            + "try{document.documentElement.setAttribute('data-nbaautoplay','armed');}catch(e){}"
+            + "if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',"
+            + "function(){setTimeout(go,400);});}else{setTimeout(go,400);}})();";
+        view.postDelayed(new Runnable() {
+            public void run() { try { view.evaluateJavascript(js, null); } catch (Exception e) { } }
+        }, 1200);
     }
 
     /** JS bridge, same names the page already uses (Hub.openExternal, ...). */
