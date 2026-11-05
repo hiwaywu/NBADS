@@ -616,6 +616,9 @@ def health_of(page):
 PROFILE_DIR = os.path.join(ROOT, "browserprofile")
 CLEAN_DIR = os.path.join(ROOT, "clean")
 PROBE = os.path.join(ROOT, "probe_play.py")
+HARVEST = os.path.join(ROOT, "harvest.py")
+HARVEST_CACHE = {}
+HARVEST_TTL = 120          # manifest tokens rotate: never hold one for long
 FINDER = os.path.join(ROOT, "find_stream.py")
 GAME_CACHE = {}
 GAME_TTL = 900
@@ -1089,6 +1092,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"date": None, "tried": tried}))
             except Exception as exc:
                 return self._send(200, json.dumps({"date": None, "error": str(exc)}))
+
+        if u.path == "/api/harvest":
+            # drive a real browser down the mirror chain and come back with the
+            # media playlist the embedded player asked for. That URL is plain HLS,
+            # so our own relay and our own <video> can play it: no iframe, no ads,
+            # no browser hand-off.
+            page = (qs.get("u") or [""])[0]
+            if not page:
+                return self._send(400, '{"ok":false,"error":"missing u"}')
+            fresh = (qs.get("fresh") or ["0"])[0] == "1"
+            hit = HARVEST_CACHE.get(page)
+            if hit and not fresh and time.time() - hit[0] < HARVEST_TTL:
+                return self._send(200, json.dumps(hit[1]))
+            try:
+                proc = subprocess.run([find_python(), HARVEST, page],
+                                      cwd=ROOT, capture_output=True, text=True, timeout=120)
+                payload = json.loads(proc.stdout.strip() or "{}")
+                if not payload:
+                    payload = {"ok": False, "error": (proc.stderr or "harvest failed")[-300:]}
+            except Exception as exc:
+                payload = {"ok": False, "error": str(exc)[:200]}
+            HARVEST_CACHE[page] = (time.time(), payload)
+            return self._send(200, json.dumps(payload))
 
         if u.path == "/api/channels":
             return self._send(200, json.dumps({"channels": channels()}))

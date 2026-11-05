@@ -782,6 +782,30 @@ async function watchGame(g){
   $('#pillQ').style.display = 'none';
   $('#pillBuf').style.display = 'none';
 
+  // First choice on every device: drive the mirror chain in a real browser, take
+  // the HLS manifest its own player asked for, and play THAT in our player through
+  // our relay. It is plain (unencrypted) HLS, so no iframe, no ads, no DRM and no
+  // browser hand-off. Falls through to the old paths if the harvest comes up dry.
+  // Stop the channel first: a game switch is not a channel stall, and the mirror
+  // watchdog must not rotate channels while the harvest runs.
+  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+  lastChannel = null;
+  try {
+    const h = await fetch('/api/harvest?u=' + encodeURIComponent(g.url)).then(r => r.json());
+    if (h && h.ok && h.m3u8 && !h.drm){
+      document.body.classList.remove('iframeMode');
+      toast('got the media playlist - playing it here', 2600);
+      setSpin(true, 'buffering the game locally...');
+      await playChannel({ name: g.name, url: h.m3u8 });
+      return;
+    }
+    if (h && h.drm){
+      toast('this mirror is Widevine - opening the player instead', 3600);
+    } else {
+      toast('no manifest from that page - using the old route', 3000);
+    }
+  } catch(e){}
+
   // The phone cannot play these feeds inside this page: they are Widevine and
   // EME refuses a non-secure origin (http://192.168.x.x is not one), so the
   // in-page iframe stays black. A top-level navigation to the https player is
