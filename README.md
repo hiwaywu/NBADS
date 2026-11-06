@@ -164,10 +164,13 @@ Better than the 1.x relay, on both counts it used to drop:
 `reload list`). Fix a dead mirror by editing that file on `main` — no APK rebuild. An optional
 third column sets a Referer for feeds that need one: `NAME | URL | https://referer/`.
 
-**Games play inside the app** on the site's own player page: the app opens the game's
-`Main N` page in its WebView, grants that page Widevine, and refuses its popups. `⌂` (or Back)
-returns to the list; the `Chrome` chip under it reopens the same page in Chrome if a stream
-shows no picture in the WebView. Two things it deliberately does **not** do:
+**Games play inside the app's player box.** A game tap opens the site's own player page in a
+second WebView laid exactly over the player area, so the list, date bar and controls stay on
+screen. The page tells the app where the box is (resize, rotation, fold/unfold); `next feed`
+cycles the game's `Main N` mirrors, `fullscreen` stretches the view (landscape), `Chrome`
+moves the game to Chrome if the view shows no picture, Back closes the view, and tapping an
+NBA TV channel hands the box back to our own player. Same ad blocking, navigation guard and
+Widevine grant as before.
 
 - play a game in *our* hls.js player — the feeds are Widevine (`hls-wvpr`, see SOP §2.4), and
   extracting or decrypting them is not something this project does

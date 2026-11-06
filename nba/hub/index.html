@@ -266,6 +266,8 @@ body{transition:none!important}
       <button id="live" title="jump back to the live edge">live</button>
       <button id="low" title="smaller buffer, closer to live">low delay</button>
       <button id="freezeBtn" title="the picture just froze">frozen?</button>
+      <button id="nextFeed" style="display:none" title="the next mirror for this game">next feed</button>
+      <button id="gameChrome" style="display:none" title="no picture? open this game in Chrome">Chrome</button>
       <button id="fs">fullscreen</button>
       <button id="reload">reload list</button>
     </div>
@@ -435,6 +437,7 @@ async function loadGames(){
 }
 
 async function playChannel(c, byMirror){
+  closeGameView();                          // NBA TV takes the box back
   // what is on screen now: a mirror that refuses to start must not take the
   // title (or the failover position) from the stream that is still playing
   const prev = { ch: lastChannel, idx: mirrorIdx, title: $('#nowTitle').textContent };
@@ -820,6 +823,61 @@ async function reportFreeze(){
 
 let lastGame = null;
 
+// ---------------------------------------------------------------- game view
+// The phone app plays a game in a native view laid exactly over #stage: the
+// site's own player page, opened as itself, while this page -- list, bar,
+// date picker -- stays on screen. The page reports where the box is; the app
+// keeps the view there.
+const game = { on: false, links: [], idx: 0, name: '', full: false };
+
+function stageBox(){
+  const r = stage.getBoundingClientRect();
+  return [r.left, r.top, r.width, r.height];
+}
+function placeGameView(){
+  if (!game.on || !(window.Hub && Hub.placeGame)) return;
+  const b = stageBox();
+  Hub.placeGame(b[0], b[1], b[2], b[3]);
+}
+function openGameView(url, name){
+  game.on = true; game.name = name || game.name;
+  document.body.classList.remove('playing', 'iframeMode');
+  document.body.classList.add('gameMode');
+  $('#idle').style.display = 'none';
+  $('#nowTitle').textContent = game.name + (game.links.length > 1 ? '  (feed ' + (game.idx + 1) + '/' + game.links.length + ')' : '');
+  ['#pillQ','#pillBuf','#pillLat','#pillSrc'].forEach(s => { const e = $(s); if (e) e.style.display = 'none'; });
+  $('#nextFeed').style.display = game.links.length > 1 ? '' : 'none';
+  $('#gameChrome').style.display = '';
+  const b = stageBox();
+  Hub.openGame(url, b[0], b[1], b[2], b[3]);
+  toast('starting the game player - muted until you tap the picture', 3200);
+}
+function closeGameView(){
+  if (!game.on) return;
+  game.on = false; game.full = false;
+  try { if (window.Hub && Hub.closeGame) Hub.closeGame(); } catch(e){}
+  document.body.classList.remove('gameMode');
+  $('#nextFeed').style.display = 'none';
+  $('#gameChrome').style.display = 'none';
+}
+// called by the app: Back closed the view, or its page crashed
+window.gameClosed = function(why){
+  game.on = false; game.full = false;
+  document.body.classList.remove('gameMode');
+  $('#nextFeed').style.display = 'none';
+  $('#gameChrome').style.display = 'none';
+  $('#nowTitle').textContent = 'nothing playing';
+  $('#idle').style.display = '';
+  if (why) toast(why, 3000);
+};
+window.gameFullChanged = function(on){
+  game.full = !!on;
+  $('#fs').textContent = on ? 'exit full' : 'fullscreen';
+};
+if (window.ResizeObserver) new ResizeObserver(placeGameView).observe(stage);
+addEventListener('resize', () => setTimeout(placeGameView, 60));
+addEventListener('orientationchange', () => setTimeout(placeGameView, 250));
+
 async function watchGame(g){
   lastGame = g;
   setSpin(true, 'finding the feed that actually plays...');
@@ -872,6 +930,15 @@ async function watchGame(g){
     hideUnmute();
     // Widevine cannot be decrypted by a webview without EME; Chrome on the same
     // phone can. Hand the link over instead of showing a black rectangle.
+    if (STANDALONE && Hub.openGame){
+      if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
+      try { v.pause(); } catch(e){}
+      lastChannel = null;
+      game.links = (j && j.links && j.links.length) ? j.links : [target];
+      game.idx = Math.max(0, game.links.indexOf(target));
+      openGameView(game.links[game.idx], g.name);
+      return;
+    }
     if (STANDALONE && Hub.openInternal){
       if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
       try { v.pause(); } catch(e){}
@@ -948,7 +1015,21 @@ function exitFullscreen(){
 function tellAppFullscreen(on){
   try { if (window.Hub && Hub.setFullscreen) Hub.setFullscreen(!!on); } catch(e){}
 }
+$('#nextFeed').onclick = () => {
+  if (!game.on || game.links.length < 2) return;
+  game.idx = (game.idx + 1) % game.links.length;
+  openGameView(game.links[game.idx]);
+};
+$('#gameChrome').onclick = () => {
+  if (!game.on) return;
+  game.on = false;
+  document.body.classList.remove('gameMode');
+  $('#nextFeed').style.display = 'none';
+  $('#gameChrome').style.display = 'none';
+  Hub.gameInBrowser();
+};
 $('#fs').onclick = () => {
+  if (game.on && window.Hub && Hub.gameFullscreen){ Hub.gameFullscreen(!game.full); return; }
   tellAppFullscreen(true); if (isFullscreen()){ exitFullscreen(); return; }
   // Fullscreen the *container*, never the raw video: our CSS then owns the
   // geometry (object-fit:contain => letterbox), on desktop and in a WebView

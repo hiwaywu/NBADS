@@ -42,9 +42,9 @@ import android.widget.Toast;
  *
  * What the shell adds on top of the page:
  *   - video fullscreen through onShowCustomView, so both fullscreen buttons work
- *   - games open in-app on the site's own player page (Widevine granted to it,
- *     popups refused), with the home chip to come back and a Chrome chip if a
- *     stream will not show a picture here
+ *   - games play inside the app: the site's own player page in a second WebView
+ *     laid over the page's player box (Widevine granted to it, popups and ad
+ *     navigation refused), so the list and bar stay on screen
  *   - the page's JS console mirrored into logcat
  */
 public class MainActivity extends Activity {
@@ -76,6 +76,28 @@ public class MainActivity extends Activity {
     private View fullView;
     private WebChromeClient.CustomViewCallback fullCallback;
 
+    // ---- the game view: a second WebView laid over the page's player box ----
+    // A game's player page is opened as itself (its player host refuses to be
+    // framed by any other site), but in this view instead of over the whole app,
+    // so the list, the bar and the rest of the app stay on screen.
+    private WebView game;
+    private boolean gameFull = false;
+    private final int[] gameBox = new int[4];      // x, y, w, h in px
+    private WebChromeClient chrome;
+    private WebViewClient pages;
+
+    /** In the game view: the player frame fills the view (a stylesheet rule, so a
+     *  frame the site re-creates after load is covered too). */
+    private static final String FOCUS_PLAYER = "(function(){"
+            + "if(document.getElementById('nbahubFocus'))return;"
+            + "var st=document.createElement('style');st.id='nbahubFocus';"
+            + "st.textContent='html,body{background:#000!important;overflow:hidden!important}'"
+            + "+'#streamIframe,iframe[allow*=encrypted-media]{position:fixed!important;inset:0!important;"
+            + "width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;"
+            + "z-index:2147483646!important;border:0!important;background:#000!important}';"
+            + "(document.head||document.documentElement).appendChild(st);"
+            + "})()";
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle state) {
@@ -98,28 +120,11 @@ public class MainActivity extends Activity {
         web = new WebView(this);
         web.setBackgroundColor(Color.BLACK);
 
-        WebSettings s = web.getSettings();
-        s.setJavaScriptEnabled(true);
-        s.setDomStorageEnabled(true);
-        s.setDatabaseEnabled(true);
-        s.setMediaPlaybackRequiresUserGesture(false);
-        s.setLoadWithOverviewMode(true);
-        s.setUseWideViewPort(true);
-        s.setSupportZoom(false);
-        s.setBuiltInZoomControls(false);
-        s.setDisplayZoomControls(false);
-        s.setTextZoom(100);
-        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
-        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setJavaScriptCanOpenWindowsAutomatically(false);
-        // true + onCreateWindow() refusing = popups are dropped. With false, a
-        // window.open() from an ad on a game page would replace the page itself.
-        s.setSupportMultipleWindows(true);
-        s.setUserAgentString(s.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION);
+        configure(web);
 
         WebView.setWebContentsDebuggingEnabled(true);   // chrome://inspect from a PC, if ever needed
 
-        web.setWebChromeClient(new WebChromeClient() {
+        chrome = new WebChromeClient() {
             @Override
             public void onShowCustomView(View view, CustomViewCallback cb) {
                 if (fullView != null) { cb.onCustomViewHidden(); return; }
@@ -128,6 +133,7 @@ public class MainActivity extends Activity {
                 root.addView(fullView, new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 web.setVisibility(View.GONE);
+                if (game != null) game.setVisibility(View.GONE);
                 chip.setVisibility(View.GONE);
                 chromeChip.setVisibility(View.GONE);
                 goFullscreen();
@@ -166,11 +172,17 @@ public class MainActivity extends Activity {
                         + " @" + m.sourceId() + ":" + m.lineNumber());
                 return true;
             }
-        });
+        };
+        web.setWebChromeClient(chrome);
 
-        web.setWebViewClient(new WebViewClient() {
+        pages = new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
+                if (view == game) {
+                    view.evaluateJavascript(FOCUS_PLAYER, null);
+                    kickPlayback(view);
+                    return;
+                }
                 updateChip();
                 // A game tap navigates to the site's own player page. Its poster /
                 // overlay waits for a click, and the tap that brought us here does not
@@ -207,6 +219,12 @@ public class MainActivity extends Activity {
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
                 Log.e(TAG, "renderer gone, didCrash=" + detail.didCrash());
+                if (view == game) {          // only the game page died: the app carries on
+                    game = null;
+                    root.removeView(view);
+                    notifyPage("window.gameClosed && gameClosed('the game player crashed')");
+                    return true;
+                }
                 restartWebView();
                 return true;
             }
@@ -239,7 +257,8 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
-        });
+        };
+        web.setWebViewClient(pages);
 
         web.addJavascriptInterface(new Bridge(), "Hub");
 
@@ -301,6 +320,29 @@ public class MainActivity extends Activity {
         openFromIntent(getIntent());
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
+    private void configure(WebView w) {
+        WebSettings s = w.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setDatabaseEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setLoadWithOverviewMode(true);
+        s.setUseWideViewPort(true);
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
+        s.setDisplayZoomControls(false);
+        s.setTextZoom(100);
+        s.setCacheMode(WebSettings.LOAD_NO_CACHE);
+        s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+        s.setJavaScriptCanOpenWindowsAutomatically(false);
+        // true + onCreateWindow() refusing = popups are dropped. With false, a
+        // window.open() from an ad on a game page would replace the page itself.
+        s.setSupportMultipleWindows(true);
+        s.setUserAgentString(s.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION);
+
+    }
+
     /** Start the player on a page we did not write: mute, click, play, repeat. */
     private void kickPlayback(final WebView view) {
         Log.i(TAG, "kick playback scheduled");
@@ -344,6 +386,49 @@ public class MainActivity extends Activity {
 
     /** JS bridge, same names the page already uses (Hub.openExternal, ...). */
     public class Bridge {
+        /** Play a game page inside the app, in the box at x,y,w,h (CSS px). */
+        @JavascriptInterface
+        public void openGame(final String url, final float x, final float y, final float w, final float h) {
+            if (url == null || !url.startsWith("http")) return;
+            runOnUiThread(new Runnable() {
+                public void run() { showGame(url, x, y, w, h); }
+            });
+        }
+
+        /** The player box moved (resize, rotation, fold/unfold). */
+        @JavascriptInterface
+        public void placeGame(final float x, final float y, final float w, final float h) {
+            runOnUiThread(new Runnable() {
+                public void run() { setGameBox(x, y, w, h); }
+            });
+        }
+
+        @JavascriptInterface
+        public void gameFullscreen(final boolean on) {
+            runOnUiThread(new Runnable() {
+                public void run() { setGameFull(on); }
+            });
+        }
+
+        @JavascriptInterface
+        public void closeGame() {
+            runOnUiThread(new Runnable() {
+                public void run() { hideGame(); }
+            });
+        }
+
+        /** The game page in Chrome instead (if the in-app view shows no picture). */
+        @JavascriptInterface
+        public void gameInBrowser() {
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    String cur = game == null ? null : game.getUrl();
+                    hideGame();
+                    if (cur != null && cur.startsWith("http")) openInBrowser(cur);
+                }
+            });
+        }
+
         @JavascriptInterface
         public void openInternal(final String url) {
             if (url == null || url.length() == 0) return;
@@ -393,6 +478,73 @@ public class MainActivity extends Activity {
         public void hubReady() { Log.i(TAG, "page ready"); }
     }
 
+    // ----------------------------------------------------------- game view
+
+    private void showGame(String url, float x, float y, float w, float h) {
+        if (game == null) {
+            game = new WebView(this);
+            game.setBackgroundColor(Color.BLACK);
+            configure(game);
+            game.setWebChromeClient(chrome);
+            game.setWebViewClient(pages);
+            // above the page, below the chips and any fullscreen video
+            root.addView(game, root.indexOfChild(web) + 1);
+        }
+        game.setVisibility(View.VISIBLE);
+        setGameBox(x, y, w, h);
+        game.loadUrl(url);
+    }
+
+    private void setGameBox(float x, float y, float w, float h) {
+        float d = getResources().getDisplayMetrics().density;   // 1 CSS px = 1 dp here
+        gameBox[0] = Math.round(x * d);
+        gameBox[1] = Math.round(y * d);
+        gameBox[2] = Math.max(1, Math.round(w * d));
+        gameBox[3] = Math.max(1, Math.round(h * d));
+        layoutGame();
+    }
+
+    private void layoutGame() {
+        if (game == null) return;
+        FrameLayout.LayoutParams lp;
+        if (gameFull) {
+            lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT);
+        } else {
+            lp = new FrameLayout.LayoutParams(gameBox[2], gameBox[3], Gravity.TOP | Gravity.START);
+            lp.leftMargin = gameBox[0];
+            lp.topMargin = gameBox[1];
+        }
+        game.setLayoutParams(lp);
+    }
+
+    private void setGameFull(boolean on) {
+        if (game == null) return;
+        gameFull = on;
+        // like the page's own fullscreen: a 16:9 picture wants landscape
+        setRequestedOrientation(on ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                                   : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        layoutGame();
+        goFullscreen();
+        notifyPage("window.gameFullChanged && gameFullChanged(" + on + ")");
+    }
+
+    private void hideGame() {
+        if (game == null) return;
+        WebView g = game;
+        game = null;
+        if (gameFull) {
+            gameFull = false;
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        }
+        root.removeView(g);
+        try { g.loadUrl("about:blank"); g.destroy(); } catch (Exception ignored) { }
+    }
+
+    private void notifyPage(String js) {
+        if (web != null) web.evaluateJavascript(js, null);
+    }
+
     // ---------------------------------------------------------------- nav
 
     /** Deep link: adb shell am start -n com.nbahub.app/.MainActivity --es chan 0 */
@@ -423,6 +575,7 @@ public class MainActivity extends Activity {
         root.removeView(fullView);
         fullView = null;
         web.setVisibility(View.VISIBLE);
+        if (game != null) game.setVisibility(View.VISIBLE);
         WebChromeClient.CustomViewCallback cb = fullCallback;
         fullCallback = null;
         if (cb != null) cb.onCustomViewHidden();
@@ -537,6 +690,13 @@ public class MainActivity extends Activity {
                 leaveCustomView();
                 return true;
             }
+            if (game != null) {
+                // the game view first: out of its fullscreen, then close it --
+                // back never leaves the app from here
+                if (gameFull) setGameFull(false);
+                else { hideGame(); notifyPage("window.gameClosed && gameClosed()"); }
+                return true;
+            }
             String cur = String.valueOf(web.getUrl());
             if (!isHome(cur)) {
                 // a game page opened in-app: back means "back to the list"
@@ -558,16 +718,19 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         if (web != null) web.onPause();
+        if (game != null) game.onPause();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         if (web != null) web.onResume();
+        if (game != null) game.onResume();
     }
 
     @Override
     protected void onDestroy() {
+        hideGame();
         if (web != null) {
             web.loadUrl("about:blank");
             web.destroy();
