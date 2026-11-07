@@ -267,7 +267,7 @@ body{transition:none!important}
       <button id="low" title="smaller buffer, closer to live">low delay</button>
       <button id="freezeBtn" title="the picture just froze">frozen?</button>
       <button id="nextFeed" style="display:none" title="the next mirror for this game">next feed</button>
-      <button id="gameChrome" style="display:none" title="no picture? open this game in Chrome">Chrome</button>
+      <button id="gameChrome" style="display:none" title="no picture? open this game in your browser (Firefox first)">Firefox</button>
       <button id="fs">fullscreen</button>
       <button id="reload">reload list</button>
     </div>
@@ -847,6 +847,7 @@ function openGameView(url, name){
   $('#nowTitle').textContent = game.name + (game.links.length > 1 ? '  (feed ' + (game.idx + 1) + '/' + game.links.length + ')' : '');
   ['#pillQ','#pillBuf','#pillLat','#pillSrc'].forEach(s => { const e = $(s); if (e) e.style.display = 'none'; });
   $('#nextFeed').style.display = game.links.length > 1 ? '' : 'none';
+  try { if (window.Hub && Hub.browser) $('#gameChrome').textContent = Hub.browser(); } catch(e){}
   $('#gameChrome').style.display = '';
   const b = stageBox();
   Hub.openGame(url, b[0], b[1], b[2], b[3]);

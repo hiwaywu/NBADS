@@ -318,7 +318,7 @@ public class MainActivity extends Activity {
 
         // the escape hatch for a game page: the same page in Chrome
         chromeChip = new TextView(this);
-        chromeChip.setText("Chrome");
+        chromeChip.setText(browserName());
         chromeChip.setTextSize(11);
         chromeChip.setTextColor(Color.parseColor("#d9ffe8"));
         chromeChip.setGravity(Gravity.CENTER);
@@ -446,7 +446,11 @@ public class MainActivity extends Activity {
             });
         }
 
-        /** The game page in Chrome instead (if the in-app view shows no picture). */
+        /** Which browser gameInBrowser()/openExternal() will open: Firefox, Brave, Chrome... */
+        @JavascriptInterface
+        public String browser() { return browserName(); }
+
+        /** The game page in a real browser instead (Firefox first, see BROWSER_PACKAGES). */
         @JavascriptInterface
         public void gameInBrowser() {
             runOnUiThread(new Runnable() {
@@ -650,15 +654,29 @@ public class MainActivity extends Activity {
     /**
      * Games are Widevine: they decrypt in a real browser, not in this WebView.
      * The system default is whatever was installed last (Edge on many phones),
-     * so ask for Chrome, then Firefox, then let the user choose.
+     * so ask for Firefox (ad blocking), then Brave, then Chrome, then let the user choose.
      */
     private static final String[] BROWSER_PACKAGES = {
+            "org.mozilla.firefox",         // first: uBlock Origin runs here, the game
+            "org.mozilla.firefox_beta",    //   sites are a wall of ads in Chrome
+            "org.mozilla.fenix",           // Firefox Nightly
+            "com.brave.browser",           // built-in blocking
             "com.android.chrome",
             "com.chrome.beta",
-            "org.mozilla.firefox",
-            "org.mozilla.firefox_beta",
-            "com.brave.browser",
     };
+    private static final String[] BROWSER_NAMES = {
+            "Firefox", "Firefox", "Firefox", "Brave", "Chrome", "Chrome"
+    };
+
+    /** The browser openInBrowser() will use, for button labels. */
+    private String browserName() {
+        for (int i = 0; i < BROWSER_PACKAGES.length; i++) {
+            try {
+                if (getPackageManager().getLaunchIntentForPackage(BROWSER_PACKAGES[i]) != null) return BROWSER_NAMES[i];
+            } catch (Exception ignored) { }
+        }
+        return "browser";
+    }
 
     private void openInBrowser(String url) {
         Uri uri = Uri.parse(url);
