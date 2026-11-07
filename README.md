@@ -276,6 +276,37 @@ changes. Last measured: **20/20** on the PC, and **14/14** on the phone (Pixel 7
 emulator, the APK from the release) with the ad shapes included -- an ad's `window.open()`
 dropped, the picture still running, a tap on an ad overlay refused.
 
+## The picture without the page, and the sound with it (2.6)
+
+2.5 made the site's own player page behave *inside* the app. 2.6 stops opening that page at all: the
+hub resolves the feed itself and hands the media playlist to the app's own player.
+
+The chain a "Main 1" link hides is walked one plain GET at a time (`event page -> /main/N -> wrapper
+-> wrapper`) until a page names its manifest -- `globalurl`, `DIRECT_STREAM_URL`, or a hard-coded
+`.m3u8`. Iframes are **ranked** before being followed: the first frame on those event pages is the
+site's *chat widget*, and chasing it is why earlier attempts reported "no stream" while the player
+sat right there. An `HTTP 403` from Cloudflare on a JVM fetch is answered by rendering that single
+page in a full-size, black-scrimmed, ad-blocked invisible WebView and handing back only its text.
+
+Two details decide whether the picture actually appears:
+
+| Detail | What it costs if missed |
+|---|---|
+| `&sessionId=<guid>` on the League Pass manifest | the Akamai edge answers **400** to the URL it just handed out; it reads as a dead stream |
+| the leaked `masterinf = {"<kid>":"<key>"}` pair | the feed is CENC; hls.js asks **Widevine** for a license that does not exist (`keySystemNoKeys`), so the app bundles **shaka-player** and plays it with `drm.clearKeys`, exactly like the provider's own page |
+
+Sound is two separate things: the element is no longer muted by our own play path (a `sound on` /
+`muted` button sits in the bar, and tapping the picture unmutes), and -- the part that was really
+silent -- League Pass keeps audio in a **separate rendition**, so the relay now runs a second relay
+for that playlist and serves a synthesised `/relay/master.m3u8` naming both. Measured on a live
+game: `webkitAudioDecodedByteCount` 0 -> 935 061 B over ~30 s, video 1920x1080 advancing in real time.
+
+A feed that dies no longer launders into the NBA TV channel list (the reported "it walks down the
+list until it hits NBA TV"): game failover hops the game's own links, and when nothing resolves the
+app shows a card with **retry** / **player page** instead of dropping the user into the ad-filled site.
+
+Full procedure, probes and numbers: [`SOP_NBAHub_InApp_Stream_2.6.md`](SOP_NBAHub_InApp_Stream_2.6.md).
+
 ## Screenshots
 
 | Desktop | Phone, before | Phone, playing | Phone, fullscreen |

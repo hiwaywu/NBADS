@@ -71,7 +71,12 @@ final class Relay {
 
     private volatile byte[] mapData;
     private volatile String segExt = "ts";
-    private volatile double target = 6.0;
+    /** Path prefix this relay answers on ("a/" for the audio rendition), so two
+     *  relays can live under /relay/ without their segment names colliding. */
+    private volatile String prefix = "";
+    /** The variant's separate audio playlist, when the master declares one.
+     *  Without it a picture plays silent: the video variant carries no audio. */
+    private volatile String audioUrl;    private volatile double target = 6.0;
     private volatile boolean ready = false;
     private volatile boolean stopped = false;
     private long floor = -1;                     // never fetch behind where we joined
@@ -141,11 +146,18 @@ final class Relay {
         }
         String[] lines = txt.split("\r?\n");
         Map<String, Boolean> audioGroups = new HashMap<String, Boolean>();
+        Map<String, String> audioUris = new HashMap<String, String>();
         for (String l : lines) {
             l = l.trim();
             if (l.startsWith("#EXT-X-MEDIA:")) {
                 Map<String, String> a = attrs(l);
-                if ("AUDIO".equals(a.get("TYPE")) && a.containsKey("URI")) audioGroups.put(a.get("GROUP-ID"), true);
+                if ("AUDIO".equals(a.get("TYPE")) && a.containsKey("URI")) {
+                    String g = a.get("GROUP-ID");
+                    audioGroups.put(g, true);
+                    // DEFAULT=YES wins; otherwise the first one listed
+                    if (!audioUris.containsKey(g) || "YES".equalsIgnoreCase(a.get("DEFAULT")))
+                        audioUris.put(g, Http.join(r.finalUrl, a.get("URI")));
+                }
             }
         }
         String bestUrl = null;
@@ -191,11 +203,15 @@ final class Relay {
         variant = v;
         String ag = bestA.get("AUDIO");
         if (ag != null && audioGroups.containsKey(ag)) {
-            // the sound is a separate playlist this relay does not carry -- say so,
-            // the page shows it instead of leaving a silent picture unexplained
-            audioNote = "separate audio rendition (" + ag + ") - may play silent";
+            // the sound is its own playlist: keep the URL so the hub can relay
+            // it alongside the picture instead of leaving a silent feed
+            audioUrl = audioUris.get(ag);
+            audioNote = audioUrl == null
+                    ? "separate audio rendition (" + ag + ") - not carried"
+                    : "separate audio rendition (" + ag + ") - relayed";
         }
-        Log.i(TAG, renditions + " rendition(s); picked " + w + "x" + bestH + " @ " + bestBw);
+        Log.i(TAG, renditions + " rendition(s); picked " + w + "x" + bestH + " @ " + bestBw
+                + (audioUrl == null ? "" : "  audio: yes"));
     }
 
     // ---------------------------------------------------------------- pump
@@ -498,6 +514,8 @@ final class Relay {
     boolean ready() { return ready; }
 
     String segExt() { return segExt; }
+    void setPrefix(String p) { prefix = p == null ? "" : p; }
+    String audioUrl() { return audioUrl; }
 
     byte[] initData() { return mapData; }
 
@@ -527,7 +545,7 @@ final class Relay {
         b.append("#EXT-X-MEDIA-SEQUENCE:").append(first).append('\n');
         Long d0 = dseq.get(first);
         if (d0 != null && d0 > 0) b.append("#EXT-X-DISCONTINUITY-SEQUENCE:").append(d0).append('\n');
-        if (mapData != null) b.append("#EXT-X-MAP:URI=\"init.mp4\"\n");
+        if (mapData != null) b.append("#EXT-X-MAP:URI=\"").append(prefix).append("init.mp4\"\n");
         String lastKey = null;
         long prev = -1;
         for (Long s : all) {
@@ -540,7 +558,7 @@ final class Relay {
             if (k != null && !k.equals(lastKey)) { b.append(k).append('\n'); lastKey = k; }
             double d = durs.containsKey(s) ? durs.get(s) : target;
             b.append("#EXTINF:").append(String.format(java.util.Locale.US, "%.3f", d)).append(",\n");
-            b.append("seg/").append(s).append('.').append(segExt).append('\n');
+            b.append(prefix).append("seg/").append(s).append('.').append(segExt).append('\n');
             prev = s;
         }
         return b.toString();

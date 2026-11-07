@@ -1,9 +1,14 @@
 # evaluate a JS expression inside the app's WebView over the DevTools WS protocol
 param(
-    [Parameter(Mandatory=$true)][string]$Expression,
+    [string]$Expression,
+    [string]$ExpressionFile,
     [string]$Port = '9222',
     [int]$TimeoutSec = 90
 )
+if ($ExpressionFile -and (Test-Path $ExpressionFile)) {
+    $Expression = [IO.File]::ReadAllText($ExpressionFile, [Text.Encoding]::UTF8)
+}
+if (-not $Expression) { throw 'no expression given' }
 $ErrorActionPreference = 'Stop'
 $targets = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/json" -UseBasicParsing -TimeoutSec 8).Content | ConvertFrom-Json
 $page = $targets | Where-Object { $_.type -eq 'page' } | Select-Object -First 1

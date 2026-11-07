@@ -261,6 +261,7 @@ public class MainActivity extends Activity {
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap fav) {
+                Log.i(TAG, "page started: " + url);
                 // the chip is the way out of a page that will not play: it has to be
                 // there the moment the page starts, not after it finishes loading
                 updateChip();
@@ -336,17 +337,18 @@ public class MainActivity extends Activity {
                     // the picture looks exactly like a play button, so "the user tapped
                     // it" would walk the app straight onto an ad landing page -- which
                     // is precisely what went wrong in the last build.
-                    if (host.equalsIgnoreCase(curHost)) return false;
-                    if (sameSite(host, curHost)) return false;
-                    if (knownHosts.contains(host)) return false;
-                    if (isPlayerish(url)) return false;
+                    if (host.equalsIgnoreCase(curHost)) { Log.i(TAG, "nav allowed (same host): " + url); return false; }
+                    if (sameSite(host, curHost)) { Log.i(TAG, "nav allowed (same site): " + url); return false; }
+                    if (knownHosts.contains(host)) { Log.i(TAG, "nav allowed (known host): " + url); return false; }
+                    if (isPlayerish(url)) { Log.i(TAG, "nav allowed (player-ish): " + url); return false; }
                     Log.i(TAG, "nav blocked (not the player): " + url);
                     return true;
                 }
-                try {
-                    startActivity(new Intent(Intent.ACTION_VIEW, u));
-                } catch (Exception ignored) {
-                }
+                // Nothing on a game page may launch another app. These mirrors ship
+                // their "play" overlay as an intent:// URL aimed at Chrome, so the
+                // old startActivity() here was the whole "it opens the browser and
+                // the ads" bug. The browser chip is the only deliberate way out.
+                Log.i(TAG, "nav blocked (scheme " + scheme + "): " + u);
                 return true;
             }
         });
@@ -637,6 +639,258 @@ public class MainActivity extends Activity {
             }
         }
 
+        // ---------------------------------------------------- manifest sniffer
+        /**
+         * sniffStream(page, referer): render a player page in the app's invisible
+         * engine and answer with the media playlist its own player asks for --
+         * {"m3u8":..,"referer":..,"html":..}, or "" when it asks for nothing.
+         *
+         * The page never appears on screen, popups are refused and ad hosts are
+         * blocked, so none of its ad layers reach the viewer. Only the playlist
+         * URL comes back, and the visible player plays it through the relay.
+         * A wrapper chain that is built in JavaScript -- the case the plain GET
+         * walk cannot follow -- is exactly what this exists for.
+         */
+        private java.util.concurrent.CountDownLatch sniffLatch;
+        private volatile String sniffHit;
+        private volatile String sniffHtml;
+        private volatile String sniffRef;
+        private volatile WebView sniffView;
+        private FrameLayout sniffScrim;
+
+        /**
+         * The invisible page gets the full screen and an opaque black sheet on
+         * top of it. A 1x1 view is not enough: the player wrappers check
+         * visibility and viewport size before they build their player, so a
+         * hidden frame answers with nothing. Full size behind a scrim keeps
+         * their checks happy while the user sees black and a status line --
+         * and ad hosts are still answered with an empty body.
+         */
+        private void showSniffScrim() {
+            if (sniffScrim != null) return;
+            FrameLayout f = new FrameLayout(MainActivity.this);
+            f.setBackgroundColor(Color.BLACK);
+            TextView t = new TextView(MainActivity.this);
+            t.setText("resolving the game feed\u2026");
+            t.setTextColor(Color.parseColor("#9aa3ad"));
+            t.setTextSize(14);
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
+            f.addView(t, lp);
+            f.setClickable(true);        // swallows taps aimed at what is under it
+            root.addView(f, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            sniffScrim = f;
+        }
+
+        private void hideSniffScrim() {
+            FrameLayout f = sniffScrim;
+            sniffScrim = null;
+            if (f != null) { try { root.removeView(f); } catch (Exception ignored) { } }
+        }
+
+        @JavascriptInterface
+        public void sniffStreamAsync(final String url, final String referer, final String cb) {
+            Log.i(TAG, "sniff request: " + url + " ref=" + referer + " cb=" + cb);
+            if (url == null || !url.toLowerCase().startsWith("http")) {
+                sniffReply(cb, "");
+                return;
+            }
+            String low = url.toLowerCase();
+            if (low.contains(".m3u8") || low.contains(".mpd")) {
+                sniffReply(cb, sniffResult(url, referer, null));
+                return;
+            }
+            // The call must return to JavaScript at once: a WebView's frames share
+            // one renderer thread, and blocking it here would stop the invisible
+            // page's own script from ever asking for its playlist. That deadlock
+            // was why the first build of this sniffer always came back empty.
+            sniffLatch = new java.util.concurrent.CountDownLatch(1);
+            sniffHit = null;
+            sniffHtml = null;
+            sniffRef = referer == null ? "" : referer;
+            runOnUiThread(new Runnable() {
+                public void run() { sniffViaWebview(url); }
+            });
+            new Thread(new Runnable() {
+                public void run() {
+                    try { sniffLatch.await(24, java.util.concurrent.TimeUnit.SECONDS); }
+                    catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    Log.i(TAG, "sniff done: hit=" + sniffHit + " html="
+                            + (sniffHtml == null ? -1 : sniffHtml.length()));
+                    final String hit = sniffHit;
+                    final String html = sniffHtml;
+                    runOnUiThread(new Runnable() {
+                        public void run() { removeSniffView(); }
+                    });
+                    sniffReply(cb, hit == null ? "" : sniffResult(hit, sniffRef, html));
+                }
+            }, "nba-sniff").start();
+        }
+
+        /** Hand the sniff's answer back to the page that asked for it. */
+        private void sniffReply(final String cb, final String json) {
+            if (cb == null || cb.length() == 0) return;
+            final String js = "window.__nbaSniff&&window.__nbaSniff("
+                    + org.json.JSONObject.quote(cb) + ","
+                    + org.json.JSONObject.quote(json == null ? "" : json) + ")";
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try { if (web != null) web.evaluateJavascript(js, null); }
+                    catch (Exception ignored) { }
+                }
+            });
+        }
+
+        private String sniffResult(String m3u8, String referer, String html) {
+            try {
+                return new org.json.JSONObject()
+                        .put("m3u8", m3u8)
+                        .put("referer", referer == null ? "" : referer)
+                        .put("html", html == null ? "" : html)
+                        .toString();
+            } catch (Exception e) { return ""; }
+        }
+
+        private String unquote(String val) {
+            if (val == null) return "";
+            if (val.length() > 1 && val.charAt(0) == '"') {
+                try { return String.valueOf(new org.json.JSONTokener(val).nextValue()); }
+                catch (Exception e) { return val.substring(1, Math.max(1, val.length() - 1)); }
+            }
+            return "null".equals(val) ? "" : val;
+        }
+
+        /** The first manifest URL anywhere in a rendered page, ad hosts aside. */
+        private String firstManifest(String html) {
+            if (html == null) return null;
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("https?://[^\"'\\\\\\s<>]+?\\.(?:m3u8|mpd)[^\"'\\\\\\s<>]*",
+                             java.util.regex.Pattern.CASE_INSENSITIVE)
+                    .matcher(html);
+            while (m.find()) {
+                if (!isAdHost(m.group())) return m.group();
+            }
+            return null;
+        }
+
+        private void sniffViaWebview(final String url) {
+            try {
+                removeSniffView();
+                final WebView sv = new WebView(MainActivity.this);
+                sniffView = sv;
+                Log.i(TAG, "sniff view created");
+                WebSettings ss = sv.getSettings();
+                ss.setJavaScriptEnabled(true);
+                ss.setDomStorageEnabled(true);
+                ss.setMediaPlaybackRequiresUserGesture(false);
+                ss.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                ss.setUserAgentString(ss.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION);
+                sv.setBackgroundColor(Color.BLACK);
+                sv.setWebChromeClient(new WebChromeClient() {
+                    @Override
+                    public boolean onCreateWindow(WebView v, boolean dialog, boolean gesture,
+                                                  android.os.Message msg) {
+                        return false;      // a page rendered in the dark gets no windows
+                    }
+                    @Override
+                    public void onPermissionRequest(PermissionRequest req) { req.deny(); }
+                });
+                sv.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest req) {
+                        try {
+                            String u = req.getUrl() == null ? "" : req.getUrl().toString();
+                            String low = u.toLowerCase();
+                            if (isAdHost(low)) {
+                                return new WebResourceResponse("text/plain", "utf-8",
+                                        new ByteArrayInputStream(new byte[0]));
+                            }
+                            // the playlist the page's own player would pull: the moment
+                            // it is asked for, the relay has everything it needs
+                            if (sniffHit == null && !low.contains("127.0.0.1")
+                                    && (low.contains(".m3u8") || low.contains(".mpd"))) {
+                                sniffHit = u;
+                                Log.i(TAG, "sniff manifest: " + u);
+                                if (sniffLatch != null) sniffLatch.countDown();
+                            }
+                        } catch (Exception ignored) { }
+                        return null;
+                    }
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                        return true;       // the engine stays on the page it was given
+                    }
+                    @Override
+                    public void onPageFinished(WebView v, String u) {
+                        Log.i(TAG, "sniff page finished: " + u);
+                        v.evaluateJavascript("(function(){try{var vv=document.querySelector('video');"
+                                + "if(vv){vv.muted=true;try{vv.play()}catch(e){}}"
+                                + "var s=['.play','.play-button','.btn-play','[class*=play]','.overlay','.poster','button'];"
+                                + "for(var i=0;i<s.length;i++){var e=document.querySelectorAll(s[i]);"
+                                + "for(var j=0;j<e.length&&j<4;j++){try{e[j].click()}catch(x){}}}}catch(e){}"
+                                + "return document.documentElement.outerHTML;})()",
+                                new android.webkit.ValueCallback<String>() {
+                                    @Override
+                                    public void onReceiveValue(String val) {
+                                        if (sniffHtml == null) sniffHtml = unquote(val);
+                                        Log.i(TAG, "sniff html: "
+                                                + (sniffHtml == null ? -1 : sniffHtml.length())
+                                                + " hit=" + sniffHit);
+                                        if (sniffHit == null) {
+                                            String m = firstManifest(sniffHtml);
+                                            if (m != null) sniffHit = m;
+                                        }
+                                        if (sniffHit != null) {
+                                            if (sniffLatch != null) sniffLatch.countDown();
+                                        } else {
+                                            // a player can build its request a beat later
+                                            root.postDelayed(new Runnable() {
+                                                public void run() {
+                                                    if (sniffLatch != null) sniffLatch.countDown();
+                                                }
+                                            }, 4000);
+                                        }
+                                    }
+                                });
+                    }
+                    @Override
+                    public void onReceivedError(WebView v, WebResourceRequest req, WebResourceError err) {
+                        if (req != null && req.isForMainFrame()) {
+                            Log.i(TAG, "sniff page error: " + err.getErrorCode() + " "
+                                    + err.getDescription() + " " + req.getUrl());
+                            if (sniffLatch != null) sniffLatch.countDown();
+                        }
+                    }
+                });
+                // full size under the scrim: the wrapper pages check the
+                // viewport before they build a player, and a 1x1 view reads as
+                // "not on screen" to them
+                root.addView(sv, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+                showSniffScrim();
+                Log.i(TAG, "sniff view loading: " + url);
+                sv.loadUrl(url);
+            } catch (Exception e) {
+                if (sniffLatch != null) sniffLatch.countDown();
+            }
+        }
+
+        private void removeSniffView() {
+            final WebView sv = sniffView;
+            sniffView = null;
+            hideSniffScrim();
+            if (sv == null) return;
+            try { root.removeView(sv); } catch (Exception ignored) { }
+            try { sv.stopLoading(); } catch (Exception ignored) { }
+            root.postDelayed(new Runnable() {
+                public void run() { try { sv.destroy(); } catch (Exception ignored) { } }
+            }, 400);
+        }
+
         @JavascriptInterface
         public void openInternal(final String url) {
             if (url == null || url.length() == 0) return;
@@ -663,9 +917,13 @@ public class MainActivity extends Activity {
         }
 @JavascriptInterface
         public void openExternal(final String url) {
+            // A page asking for "external" is asking for Chrome, and that is how the
+            // ad layer used to win. Keep it in the app; the chip under the picture
+            // is the only path to a browser, and a person has to tap it.
             if (url == null || url.length() == 0) return;
+            Log.i(TAG, "openExternal kept in-app: " + url);
             runOnUiThread(new Runnable() {
-                public void run() { openInBrowser(url); }
+                public void run() { if (web != null) web.loadUrl(url); }
             });
         }
 

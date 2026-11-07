@@ -27,7 +27,7 @@ Get-ChildItem $out -Recurse -Directory -ErrorAction SilentlyContinue | Where-Obj
 # the standalone app carries the PC page, hls.js and the channel list itself
 New-Item -ItemType Directory -Force -Path "$out\assets" | Out-Null
 $repo = Split-Path -Parent $root
-Copy-Item "$repo\nba\hub\index.html", "$repo\nba\hub\hls.min.js", "$repo\nba\feeds.txt" "$out\assets\" -Force
+Copy-Item "$repo\nba\hub\index.html", "$repo\nba\hub\hls.min.js", "$repo\nba\hub\shaka.js", "$repo\nba\feeds.txt" "$out\assets\" -Force
 
 Write-Host '[1/6] compiling resources' -ForegroundColor Cyan
 & "$bt\aapt2.exe" compile --dir "$root\res" -o "$out\res.zip"
@@ -38,7 +38,7 @@ Write-Host '[2/6] linking resources + manifest' -ForegroundColor Cyan
     --manifest "$root\AndroidManifest.xml" -R "$out\res.zip" -A "$out\assets" `
     --java "$out\gen" --auto-add-overlay `
     --min-sdk-version 24 --target-sdk-version 34 `
-    --version-code 5 --version-name 2.1
+    --version-code 6 --version-name 2.6
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
 Write-Host '[3/6] compiling java' -ForegroundColor Cyan

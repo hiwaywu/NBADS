@@ -7,6 +7,7 @@
 <title>nba hub</title>
 <link rel="icon" href="data:,">
 <script src="/hls.min.js"></script>
+<script src="/shaka.js" defer></script>
 <style>
   :root{
     --bg:#0b0c0f; --panel:#141519; --panel2:#191b20; --line:#23252c;
@@ -264,6 +265,7 @@ body{transition:none!important}
     <span class="pill" id="pillSrc" style="display:none" title="where this picture comes from">-</span>
     <div class="right">
       <button id="live" title="jump back to the live edge">live</button>
+      <button id="snd" title="sound on / off">muted</button>
       <button id="low" title="smaller buffer, closer to live">low delay</button>
       <button id="freezeBtn" title="the picture just froze">frozen?</button>
       <button id="fs">fullscreen</button>
@@ -456,10 +458,11 @@ async function loadGames(){
   render();
 }
 
-async function playChannel(c, byMirror, keys){
+async function playChannel(c, byMirror, keys, fromGame, useShaka){
   // what is on screen now: a mirror that refuses to start must not take the
   // title (or the failover position) from the stream that is still playing
   const prev = { ch: lastChannel, idx: mirrorIdx, title: $('#nowTitle').textContent };
+  gameNow = fromGame ? (pol.game || gameNow) : null;
   lastChannel = c;
   const idx = channels.findIndex(x => x.url === c.url);
   if (!byMirror) { mirrorTried.clear(); mirrorReason = ''; }
@@ -485,7 +488,13 @@ async function playChannel(c, byMirror, keys){
     }
     const srcPill = $('#pillSrc');
     if (srcPill){ srcPill.textContent = 'relay - ' + (c.name || 'channel'); srcPill.className = 'pill good'; srcPill.style.display = ''; }
-    attach(j.url, keys);
+    // shaka reads the relay's playlist on our own origin: no CORS, keeps the
+    // DVR ring, and its clearKeys config is the provider's own decrypt recipe.
+    // A feed that keeps its sound in a separate rendition plays silent unless
+    // the player is given the master that names both, so prefer that one.
+    const shakaUrl = (j.audio && j.master) ? j.master : j.url;
+    if (useShaka && typeof shaka !== 'undefined') attachShaka(shakaUrl, keys);
+    else attach(j.url, keys);
     toast('relay up - buffering the live edge');
     pollStats();
   } catch(e){
@@ -521,6 +530,25 @@ function mirrorTag(){
 }
 
 function mirrorFail(reason){
+  // a dead game feed does not get laundered into the NBA TV channel list:
+  // its failover hops the game's own player links; that's the whole point
+  if (gameNow){
+    const pool = (pol.cands || []).filter(c => c.ok && c.frame);
+    if (!pool.length) { toast('game feed failed (' + reason + ')', 4000); return false; }
+    const now2 = Date.now();
+    if (now2 - mirrorLastSwitch < 15000) return false;
+    mirrorLastSwitch = now2;
+    for (const c of pool){
+      if (mirrorTried.has(c.frame)) continue;
+      mirrorTried.add(c.frame);
+      mirrorReason = reason;
+      toast('game link failed - trying the next main link', 3200);
+      watchGame(gameNow, c.frame);
+      return true;
+    }
+    toast('every game link failed (' + reason + ') - use the site chip if one more try will not help', 5000);
+    return false;
+  }
   if (!channels.length) return false;
   const now = Date.now();
   if (now - mirrorLastSwitch < 15000) return false;        // no ping-pong
@@ -562,20 +590,50 @@ function noteStall(){
   if (mirrorStalls.length >= 3) { mirrorStalls = []; mirrorFail('repeated buffering'); }
 }
 
-function tryPlay(){
-  // Android WebView eats the user gesture while we await the resolve call, so
-  // an unmuted play() is always rejected there. Start muted, offer one tap.
-  if (IS_MOBILE) { v.muted = true; v.play().then(showUnmute).catch(function(){}); return; }
-  const p = v.play();
-  if (p && p.catch) {
-    p.then(hideUnmute).catch(function () {
-      v.muted = true;
-      v.play().then(showUnmute).catch(function () {});
-    });
+// ---------------------------------------------------------------- sound
+// The WebView is configured with mediaPlaybackRequiresUserGesture(false), so
+// there is no autoplay policy to fight: the only reason the picture was silent
+// is that our own play path muted the element and never unmuted it. Sound is
+// therefore a plain state we own, and every entry point (chip, stage tap, the
+// bar button, a game starting) goes through the same two functions.
+function soundState(){
+  const on = !v.muted && v.volume > 0;
+  const b = $('#snd');
+  if (b){
+    b.textContent = on ? 'sound on' : 'muted';
+    b.style.color = on ? 'var(--accent)' : '';
   }
+  return on;
+}
+function soundOn(){
+  try { v.muted = false; v.volume = 1; } catch(e){}
+  const p = v.play();
+  if (p && p.catch) p.catch(function(){});
+  hideUnmute();
+  soundState();
+}
+function soundOff(){
+  try { v.muted = true; } catch(e){}
+  soundState();
 }
 function showUnmute(){ const u = $('#unmute'); if (u) u.style.display = 'block'; }
 function hideUnmute(){ const u = $('#unmute'); if (u) u.style.display = 'none'; }
+
+function tryPlay(){
+  // Android WebView eats the user gesture while we await the resolve call, so
+  // an unmuted play() was rejected there. This build disables that policy in
+  // MainActivity, so try sound first and only fall back to muted+chip.
+  const p = v.play();
+  if (!p || !p.catch){ v.muted = false; soundState(); return; }
+  p.then(function(){ soundOn(); })
+   .catch(function(){
+     v.muted = true;
+     const q = v.play();
+     if (q && q.catch) q.catch(function(){});
+     showUnmute();
+     soundState();
+   });
+}
 
 // ---------- latency tuning ----------
 // The relay already buffers ~60 s and serves it from localhost, so the player's
@@ -609,6 +667,83 @@ function hlsConfig(){
   };
 }
 
+let shakaPlayer = null;
+let shakaReady = typeof shaka !== 'undefined';
+// which thing is on screen: a game (failover hops player links) or a channel
+// (failover hops the channel mirrors) -- the laundering that sent every dead
+// game feed to NBA TV happened exactly here
+let gameNow = null;
+
+function attachShaka(url, keys){
+  const _pf = $('#pf'); if (_pf) { _pf.style.display = 'none'; _pf.removeAttribute('src'); }
+  if (pol.timer) { clearInterval(pol.timer); pol.timer = null; pol.game = null; }
+  document.body.classList.remove('iframeMode');
+  $('#reloadStream').style.display = 'none';
+  $('#idle').style.display = 'none';
+  document.body.classList.add('playing');
+  relayBase = url.replace(/\/live\.m3u8.*$/, '');
+  attachAt = Date.now();
+  // drop the hls.js instance: the relay is one stream, the player one at a time
+  if (hls){ hls.destroy(); hls = null; }
+  if (shakaPlayer){ try { shakaPlayer.destroy(); } catch(e){} shakaPlayer = null; }
+  v.removeAttribute('src');
+  setSpin(true, 'starting the game feed (shaka + clearkey)...');
+  const boot = () => {
+    if (typeof shaka === 'undefined'){ toast('shaka player did not load - falling back to hls', 3000); setTimeout(() => attach(url, keys), 100); return; }
+    shaka.polyfill.installAll();
+    if (!shaka.Player.isBrowserSupported()){
+      toast('shaka: browser unsupported - falling back', 2600);
+      setTimeout(() => attach(url, keys), 200);
+      return;
+    }
+    shakaPlayer = new shaka.Player(v);
+    const cfg = {};
+    if (keys && typeof keys === 'object' && Object.keys(keys).length){
+      // exactly what the provider's own page does for these feeds: local
+      // clearkey, no license server involved
+      cfg.drm = { clearKeys: keys };
+    }
+    cfg.streaming = { lowLatencyMode: false, bufferingGoal: 40, rebufferingGoal: 2 };
+    cfg.manifest = { retryParameters: { timeout: 20000, maxAttempts: 10, backoffFactor: 1.4 } };
+    shakaPlayer.configure(cfg);
+    shakaPlayer.load(url).then(() => {
+      $('#idle').style.display = 'none';
+      document.body.classList.add('playing');
+      setSpin(false);
+      // the game feed must come up with sound, not muted: the old path muted
+      // the element and hid the only button that could undo it
+      v.muted = false;
+      try { v.volume = 1; } catch(e){}
+      const p = v.play();
+      if (p && p.catch) p.catch(function(){ showUnmute(); });
+      soundState();
+    }).catch(err => {
+      const why = (err && (err.message || err.code)) || 'unknown';
+      console.log('shaka load failed: ' + why);
+      toast('game feed error: ' + why, 4200);
+      setSpin(false);
+      // a dead game feed must never launder into the channels list AND must
+      // never dump the user into the ad-filled site: hop the game's other
+      // links, then say so and stay put
+      if (pol.cands && pol.cands.length){
+        const next = pol.cands.find(c => c.ok && c.frame && (!pol.candsTried || !pol.candsTried.has(c.frame)));
+        if (next){
+          toast('that game link is dead - trying the next main link', 3200);
+          watchGame(pol.game || lastGame, next.frame);
+          return;
+        }
+      }
+      polReset(pol.game || lastGame, 0);
+      const g2 = lastGame || pol.game;
+      if (g2) showResolveFailed(g2);
+    });
+  };
+  // shaka-player is deferred; wait for it before the first use
+  const wait = () => {
+    if (typeof shaka !== 'undefined') boot(); else setTimeout(wait, 200);
+  };
+  wait();
+}
 function attach(url, keys){
   const _pf = $('#pf'); if (_pf) { _pf.style.display = 'none'; _pf.removeAttribute('src'); }
   if (pol.timer) { clearInterval(pol.timer); pol.timer = null; pol.game = null; }
@@ -619,15 +754,13 @@ function attach(url, keys){
   relayBase = url.replace(/\/live\.m3u8.*$/, '');
   attachAt = Date.now();
   if (hls){ hls.destroy(); hls = null; }
+  if (shakaPlayer){ try { shakaPlayer.destroy(); } catch(e){} shakaPlayer = null; }
   v.removeAttribute('src');
   setSpin(true, 'starting the stream...');
   if (window.Hls && Hls.isSupported()){
     const cfg = hlsConfig();
-    // A harvested feed may be Widevine-packaged, but the provider leaks the
-    // clear-key pair next to it. EME in the secure 127.0.0.1 webview can decrypt
-    // it with org.w3.clearkey and no license server: the hub answers the JWK
-    // challenge at /api/clearkey out of the pair it harvested.
     if (keys && typeof keys === 'object' && Object.keys(keys).length){
+      // hls.js path kept for non-game feeds that happen to carry keys
       cfg.emeEnabled = true;
       cfg.drmSystems = { 'org.w3.clearkey': { licenseUrl: '/api/clearkey' } };
     }
@@ -641,7 +774,6 @@ function attach(url, keys){
         $('#pillQ').className = 'pill good';
         $('#pillQ').style.display = '';
       }
-      // jump straight to the target distance from the live edge
       try {
         const edge = hls.liveSyncPosition;
         if (typeof edge === 'number' && isFinite(edge) && Math.abs(v.currentTime - edge) > 1.5){
@@ -655,9 +787,7 @@ function attach(url, keys){
       if (!d.fatal) return;
       setSpin(false);
       toast('playback error: ' + d.details, 4000);
-      // one automatic retry: relays drop the first connection after a cold start
-      if (!attach._retried){ attach._retried = true; setTimeout(() => attach(url), 1500); return; }
-      // the retry did not save it -- this mirror is done
+      if (!attach._retried){ attach._retried = true; setTimeout(() => attach(url, keys), 1500); return; }
       mirrorFail('feed error: ' + d.details);
     });
     attach._retried = false;
@@ -912,28 +1042,62 @@ function directIn(text){
   if (m) return m[1];
   return null;
 }
+
+// Frames that are part of the page furniture, not the picture. Chasing one of
+// these is how the resolver ended up reading a chat widget instead of the
+// player (and then reporting "no stream" while the video was right there).
+const RX_CHATFRAME = /chat|discord|tawk|intercom|facebook\.com\/plugins|youtube\.com\/embed\/live_chat|disqus|comment|zendesk|crisp|livechat/i;
+function frameScore(host, src){
+  let s = 0;
+  if (RX_CHATFRAME.test(host) || RX_CHATFRAME.test(src)) return -100;
+  if (/\/main\//.test(src)) s += 6;
+  if (/\/top\//.test(src)) s += 5;
+  if (/\/iframe\//.test(src)) s += 5;
+  if (/\/embed/.test(src)) s += 4;
+  if (/\/player/.test(src)) s += 4;
+  if (/\/live/.test(src)) s += 2;
+  if (/stream|topstream|trend|embed/.test(host)) s += 3;
+  return s;
+}
+
 function nextHopIn(text){
-  let m = RX_IFRAME.exec(text);
-  if (!m){
-    m = RX_JS_SRC.exec(text);
-    if (m){
-      // "iframe" must sit near the .src line: an ad's random .src would not
-      const at = m.index;
-      const ctx = text.slice(Math.max(0, at - 260), at + 260).toLowerCase();
-      if (ctx.includes('iframe') && !adish(m[1])) return m[1];
-      return null;
-    }
+  // 1) the page's own named player frame, if it has one
+  const named = /<iframe[^>]*\bid\s*=\s*["'](?:stream|player|videoFrame|embed)[^"']*["'][^>]*\bsrc\s*=\s*["']([^"']+)["']/i.exec(text);
+  if (named && !adish(named[1]) && !RX_CHATFRAME.test(named[1])) return named[1];
+
+  // 2) every iframe on the page, ranked: the player beats chat/banner frames
+  let best = null, bestScore = -1;
+  const RX_ANY_IFRAME = /<iframe[^>]*?\bsrc\s*=\s*["']([^"']+)["']/gi;
+  let m;
+  while ((m = RX_ANY_IFRAME.exec(text))){
+    const src = m[1].replace(/&amp;/g, '&');
+    if (adish(src)) continue;
+    const sc = frameScore(hostOf2(src), src);
+    if (sc > bestScore){ bestScore = sc; best = src; }
   }
-  if (m && !adish(m[1])) return m[1];
+  if (best && bestScore >= 0) return best;
+
+  // 3) an iframe built in JavaScript (".src = url" with "iframe" nearby)
+  const RX_JSRC = /\.src\s*=\s*["'](https?:\/\/[^"'\r\n]+)["']/g;
+  while ((m = RX_JSRC.exec(text))){
+    const src = m[1];
+    if (adish(src) || RX_CHATFRAME.test(src)) continue;
+    const at = m.index;
+    const ctx = text.slice(Math.max(0, at - 260), at + 260).toLowerCase();
+    if (ctx.includes('iframe')) return src;
+  }
   return null;
 }
 
-async function harvestChain(g){
+async function harvestChain(g, linksOverride){
   let links = [];
-  try {
-    const j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json());
-    if (j && j.links && j.links.length) links = j.links.slice(0, 4);
-  } catch(e){}
+  if (linksOverride && linksOverride.length){ links = linksOverride.slice(0, 4); }
+  else {
+    try {
+      const j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json());
+      if (j && j.links && j.links.length) links = j.links.slice(0, 4);
+    } catch(e){}
+  }
   if (!links.length) links = [g.url];
   const report = { tried: [] };
   for (const main of links){
@@ -949,8 +1113,25 @@ async function harvestChain(g){
       if (k) keys = k;
       const found = directIn(text);
       if (found){
+        let streamUrl = joinUrl(u, found);
+        // the provider's own player appends &sessionId=<guid> to this manifest
+        // family; without it the Akamai edge answers 400
+        if (!/sessionId=/i.test(streamUrl)){
+          streamUrl += '&sessionId=' + ([8,4,4,4,12]
+              .map(n => Array.from({length: n}, () =>
+                '0123456789abcdef'[Math.floor(Math.random()*16)]).join('')).join('-'));
+        }
+        // the hub needs the clear-key pair itself: the license endpoint reads
+        // it back out when hls.js runs the EME decrypt
+        if (keys){
+          try {
+            await fetch('/api/keys', { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(Object.keys(keys).map(kid => ({ kid: kid, key: keys[kid] }))) });
+          } catch(e){}
+        }
         return {
-          ok: true, m3u8: joinUrl(u, found),
+          ok: true, m3u8: streamUrl,
           via: hostOf2(found), referer: u, keys: keys, hops: docs
         };
       }
@@ -966,6 +1147,38 @@ async function harvestChain(g){
   }
   console.log('harvest failed:', report.tried);
   return { ok: false, ...report };
+}
+function sniffStream(u, referer){
+  return new Promise(function(resolve){
+    if (!(STANDALONE && window.Hub && Hub.sniffStreamAsync)){ resolve(null); return; }
+    const id = 'sniff' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+    let done = false;
+    const finish = function(j){
+      if (done) return;
+      done = true;
+      try { delete window.__nbaSniff; } catch(e){ window.__nbaSniff = null; }
+      if (!j || !j.m3u8){ resolve(null); return; }
+      const keys = j.html ? keysFrom(j.html) : null;
+      if (keys){
+        fetch('/api/keys', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.keys(keys).map(kid => ({ kid: kid, key: keys[kid] }))) }).catch(function(){});
+      }
+      resolve({ ok: true, m3u8: j.m3u8, referer: j.referer || referer || '',
+                keys: keys, via: hostOf2(j.m3u8), sniffed: true });
+    };
+    // the app answers here, not as a return value: a blocking bridge call would
+    // freeze the renderer the invisible page needs to ask for its playlist
+    window.__nbaSniff = function(who, raw){
+      if (who !== id) return;
+      let j = null;
+      try { j = raw ? JSON.parse(raw) : null; } catch(e){}
+      finish(j);
+    };
+    try { Hub.sniffStreamAsync(u, referer || '', id); }
+    catch(e){ finish(null); return; }
+    setTimeout(function(){ finish(null); }, 20000);
+  });
 }
 
 
@@ -1045,7 +1258,51 @@ window.addEventListener('message', function(ev){
   toast('the player asked for a window - showing it here', 2600);
 });
 
-async function watchGame(g){
+// The resolver struck out: no playlist came back from the wrapper chain or from
+// the rendered player page. Staying in the app and saying so beats handing the
+// user to a site whose whole business is overlays and popups.
+function showResolveFailed(g){
+  document.body.classList.remove('playing');
+  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+  const idle = $('#idle');
+  if (!idle) return;
+  idle.style.display = 'flex';
+  idle.innerHTML = '';
+  const h1 = document.createElement('h1');
+  const pre = g && g.state && g.state !== 'in';
+  h1.textContent = pre ? 'no player on the page yet' : 'could not get the direct feed';
+  const p = document.createElement('p');
+  p.innerHTML = pre
+    ? 'this game has not tipped off (' + (g.time || 'later today') + '), and the wrapper pages only '
+      + 'put a player in place at game time.<br><b>retry</b> runs the resolver again at tip-off.'
+    : 'the wrapper pages handed over no playlist on this network.<br>'
+      + '<b>retry</b> runs the resolver again. <b>player page</b> opens the site&rsquo;s own '
+      + 'player inside the app (ads blocked, &#8962; or Back comes back here).';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:10px;margin-top:4px';
+  const b1 = document.createElement('button');
+  b1.type = 'button';
+  b1.textContent = 'retry';
+  b1.style.cssText = 'background:#16281f;border:1px solid #2c4a39;color:#3ddc84;'
+    + 'padding:10px 18px;border-radius:9px;font:14px -apple-system,Segoe UI,sans-serif;cursor:pointer';
+  b1.onclick = function(){ idle.innerHTML = ''; watchGame(g); };
+  const b2 = document.createElement('button');
+  b2.type = 'button';
+  b2.textContent = 'player page';
+  b2.style.cssText = 'background:#1b1e24;border:1px solid #2a2d35;color:#c9cdd6;'
+    + 'padding:10px 18px;border-radius:9px;font:14px -apple-system,Segoe UI,sans-serif;cursor:pointer';
+  b2.onclick = function(){
+    if (window.Hub && Hub.openInternal) Hub.openInternal(g.url);
+    else location.href = g.url;
+  };
+  row.appendChild(b1);
+  row.appendChild(b2);
+  idle.appendChild(h1);
+  idle.appendChild(p);
+  idle.appendChild(row);
+}
+
+async function watchGame(g, useFrame){
   lastGame = g;
   setSpin(true, 'finding the feed that actually plays...');
   $('#nowTitle').textContent = g.name;
@@ -1090,11 +1347,30 @@ async function watchGame(g){
     if (STANDALONE){
       setSpin(true, 'resolving the stream link directly...');
       $('#nowTitle').textContent = g.name;
-      try {
-        const h = await harvestChain(g);
-        if (h && h.m3u8){
+      let h = null;
+      try { h = await harvestChain(g, useFrame ? [useFrame] : null); }
+      catch(e){ toast('direct resolve failed (' + e.message + ') - trying the player page', 3200); }
+      // The plain-GET walk stops at a chain built in JavaScript. Those pages are
+      // rendered by the app's invisible engine instead -- no screen, no popups,
+      // ad hosts blocked -- and only the media playlist it asks for comes back.
+      if (!(h && h.m3u8)){
+        let jr = null;
+        try { jr = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json()); } catch(e){}
+        const cand = [];
+        if (jr && jr.browser) cand.push(jr.browser);
+        if (jr && jr.open && cand.indexOf(jr.open) < 0) cand.push(jr.open);
+        if (g.url && cand.indexOf(g.url) < 0) cand.push(g.url);
+        for (let i = 0; i < cand.length && i < 3; i++){
+          setSpin(true, 'reading the player page for its stream...');
+          const s = await sniffStream(cand[i], cand[i] === g.url ? '' : g.url);
+          if (s && s.m3u8){ h = s; toast('stream found - playing it in the app, no page', 3000); break; }
+        }
+      }
+      if (h && h.m3u8){
           if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
-          lastChannel = null;
+          lastChannel = { name: g.name, url: h.m3u8 };   // the failover pool belongs to this game now
+          gameNow = g;
+          mirrorTried.clear(); mirrorReason = '';
           document.body.classList.remove('iframeMode');
           const srcPill = $('#pillSrc');
           if (srcPill){
@@ -1102,10 +1378,18 @@ async function watchGame(g){
             srcPill.className = 'pill good'; srcPill.style.display = '';
           }
           toast('direct feed resolved - playing in-app', 3000);
-          await playChannel({ name: g.name, url: h.m3u8, referer: h.referer }, false, h.keys);
+          // shaka handles the clearkey-encrypted HLS the way the provider's own
+          // player does; it reads the relay, so nothing is cross-origin
+          await playChannel({ name: g.name, url: h.m3u8, referer: h.referer },
+                            false, h.keys, true,
+                            !!(h.keys && typeof shaka !== 'undefined'));
           return;
-        }
-      } catch(e){ toast('direct resolve failed (' + e.message + ') - opening the player page', 3200); }
+      }
+      // Nothing resolved. Do NOT dump the user into the ad-filled site: offer
+      // the two honest choices and stay on our own page.
+      setSpin(false);
+      showResolveFailed(g);
+      return;
     }
     let j = null;
     try { j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json()); } catch(e){}
@@ -1257,7 +1541,16 @@ $('#reload').onclick = () => {
   fetch('/api/refresh?_=' + Date.now()).catch(() => {}).then(() => boot());
 };$('#freezeBtn').onclick = () => reportFreeze();
 $('#live').onclick = () => seekLive();
-$('#unmute').onclick = function(){ v.muted = false; v.play().catch(()=>{}); hideUnmute(); };
+$('#unmute').onclick = function(){ soundOn(); };
+// the picture itself is the biggest "tap for sound" target there is
+stage.addEventListener('click', function(ev){
+  if (!v.muted) return;
+  if (ev.target && (ev.target.closest && ev.target.closest('button'))) return;
+  soundOn();
+}, true);
+$('#snd').onclick = function(){ if (v.muted) soundOn(); else soundOff(); };
+// starting playback anywhere (game or channel) restores the pill's label
+v.addEventListener('plays', function(){ soundState(); });
 $('#reloadStream').onclick = () => {
   const pf = $('#pf');
   const base = (pf.getAttribute('src') || '').split('&_=')[0];

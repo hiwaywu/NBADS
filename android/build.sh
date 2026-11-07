@@ -11,8 +11,8 @@ bt="${BUILD_TOOLS:-$sdk/build-tools/36.0.0}"
 [ -d "$bt" ] || bt="$(ls -d "$sdk"/build-tools/* 2>/dev/null | sort -V | tail -1)"
 jar="${ANDROID_JAR:-$sdk/platforms/android-35/android.jar}"
 out="$here/build"
-ver_code=4
-ver_name=2.0
+ver_code=6
+ver_name=2.6
 
 for f in "$bt/aapt2" "$bt/d8" "$bt/zipalign" "$bt/apksigner" "$jar"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
@@ -22,7 +22,7 @@ rm -rf "$out"
 mkdir -p "$out/gen" "$out/classes" "$out/dex" "$out/assets"
 
 echo "[1/7] assets: the PC page, hls.js and the channel list, bundled"
-cp "$repo/nba/hub/index.html" "$repo/nba/hub/hls.min.js" "$out/assets/"
+cp "$repo/nba/hub/index.html" "$repo/nba/hub/hls.min.js" "$repo/nba/hub/shaka.js" "$out/assets/"
 cp "$repo/nba/feeds.txt" "$out/assets/"
 
 echo "[2/7] compiling resources"

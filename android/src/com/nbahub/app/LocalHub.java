@@ -53,7 +53,7 @@ import java.util.regex.Pattern;
 final class LocalHub {
 
     private static final String TAG = "nbahub.hub";
-    static final String VERSION = "2.2";
+    static final String VERSION = "2.6";
     private static final String FEEDS_REMOTE =
             "https://raw.githubusercontent.com/hiwaywu/NBADS/main/nba/feeds.txt";
 
@@ -71,6 +71,9 @@ final class LocalHub {
     private volatile Relay relay;
     private volatile boolean relayLow;
     private final Object relayLock = new Object();
+    /** Sound lives in its own playlist on some feeds (League Pass does this);
+     *  the video relay alone plays silent, so it gets a companion relay. */
+    private volatile Relay relayAudio;
     private volatile String feedsText;
     private volatile String feedsFrom = "bundled";
     private final Map<String, Object[]> resolved = new HashMap<String, Object[]>();
@@ -227,6 +230,7 @@ final class LocalHub {
         String method, path, query;
         Map<String, String> qs = new HashMap<String, String>();
         boolean keepAlive = true;
+        byte[] body;
 
         String q(String k) {
             String v = qs.get(k);
@@ -271,12 +275,26 @@ final class LocalHub {
         r.method = p[0];
         String target = p[1];
         r.keepAlive = p.length < 3 || !"HTTP/1.0".equals(p[2]);
+        int clen = 0;
         String h;
         while ((h = readLine(in)) != null && h.length() > 0) {
             int c = h.indexOf(':');
             if (c > 0 && h.substring(0, c).trim().equalsIgnoreCase("connection")) {
                 r.keepAlive = !h.substring(c + 1).trim().equalsIgnoreCase("close");
             }
+            if (c > 0 && h.substring(0, c).trim().equalsIgnoreCase("content-length")) {
+                try { clen = Integer.parseInt(h.substring(c + 1).trim()); } catch (NumberFormatException ignored) { }
+            }
+        }
+        if (clen > 0) {
+            byte[] body = new byte[clen];
+            int got = 0;
+            while (got < clen) {
+                int n = in.read(body, got, clen - got);
+                if (n < 0) break;
+                got += n;
+            }
+            r.body = body;
         }
         int q = target.indexOf('?');
         r.path = q >= 0 ? target.substring(0, q) : target;
@@ -368,6 +386,7 @@ final class LocalHub {
         String p = r.path;
         if (p.equals("/") || p.equals("/index.html")) { asset(out, r, "index.html", "text/html; charset=utf-8"); return; }
         if (p.equals("/hls.min.js")) { asset(out, r, "hls.min.js", "application/javascript"); return; }
+        if (p.equals("/shaka.js")) { asset(out, r, "shaka.js", "application/javascript"); return; }
         if (p.startsWith("/relay/")) { relayRoute(r, out, p.substring(7)); return; }
 
         if (p.equals("/api/ping")) {
@@ -456,10 +475,15 @@ final class LocalHub {
                 return;
             }
             String base = "http://127.0.0.1:" + server.getLocalPort() + "/relay";
+            boolean hasAudio = relayAudio != null && !relayAudio.isStopped();
             json(out, r, new JSONObject()
                     .put("ok", true)
                     .put("url", base + "/live.m3u8")
                     .put("local", base + "/live.m3u8")
+                    // master names the sound as its own rendition; without it the
+                    // picture is silent when the feed keeps audio separate
+                    .put("master", base + "/master.m3u8")
+                    .put("audio", hasAudio)
                     .put("port", server.getLocalPort())
                     .put("stats", rl.stats()));
             return;
@@ -525,6 +549,31 @@ final class LocalHub {
                 }
             }
             json(out, r, new JSONObject().put("keys", arr));
+            return;
+        }
+        if (p.equals("/api/keys") && "POST".equals(r.method)) {
+            try {
+                byte[] raw = r.body == null ? new byte[0] : r.body;
+                org.json.JSONTokener tk = new org.json.JSONTokener(new String(raw, "UTF-8"));
+                org.json.JSONArray arr = (org.json.JSONArray) tk.nextValue();
+                Map<String, String> ks = new HashMap<String, String>();
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject k = arr.optJSONObject(i);
+                    if (k == null) continue;
+                    String kid = k.optString("kid"), key = k.optString("key");
+                    if (kid.matches("[0-9a-fA-F]{16,64}") && key.matches("[0-9a-fA-F]{16,64}"))
+                        ks.put(kid.toLowerCase(Locale.US), key.toLowerCase(Locale.US));
+                }
+                if (!ks.isEmpty()) {
+                    lastClearKeys = ks;
+                    json(out, r, new JSONObject().put("ok", true).put("keys", ks.size()));
+                } else {
+                    json(out, r, new JSONObject().put("ok", false));
+                }
+            } catch (Exception e) {
+                json(out, r, new JSONObject().put("ok", false)
+                        .put("error", String.valueOf(e.getMessage())));
+            }
             return;
         }
         if (p.equals("/api/health")) {
@@ -748,6 +797,12 @@ final class LocalHub {
             String found = directStreamIn(text);
             if (found != null) {
                 found = Http.join(resp.finalUrl, found);
+                // the provider's own player appends &sessionId=<guid> to this
+                // manifest family; without one the Akamai edge answers 400
+                // ("GP" entitlement feeds gate on the presence of the param)
+                if (!found.toLowerCase().contains("sessionid=")) {
+                    found = found + "&sessionId=" + java.util.UUID.randomUUID();
+                }
                 if (keys != null) lastClearKeys = keys;
                 try {
                     return new JSONObject()
@@ -821,6 +876,23 @@ final class LocalHub {
             n.start();
             relay = n;
             relayLow = low;
+            // the picture's sound may live in its own playlist: relay that too,
+            // under /relay/a/ so its segments cannot collide with the video's
+            Relay oldAudio = relayAudio;
+            relayAudio = null;
+            if (n.audioUrl() != null) {
+                try {
+                    Relay an = new Relay(n.audioUrl(), ref, low, dvrRoot());
+                    an.setPrefix("a/");
+                    an.resolve();
+                    an.start();
+                    relayAudio = an;
+                    Log.i(TAG, "audio relay up: " + n.audioUrl());
+                } catch (Exception e) {
+                    Log.i(TAG, "audio relay failed: " + e.getMessage());
+                }
+            }
+            if (oldAudio != null) oldAudio.stop();
             return n;
         }
     }
@@ -835,6 +907,75 @@ final class LocalHub {
         }
         rl.lastHit = System.currentTimeMillis();
         rl.hits++;
+        // ---- the audio rendition, when the feed keeps its sound separately ----
+        if (sub.equals("master.m3u8")) {
+            // a master that names our own video playlist plus the audio one, so
+            // the player can attach the sound the raw variant playlist lacks
+            Relay au = relayAudio;
+            StringBuilder b = new StringBuilder(512);
+            b.append("#EXTM3U\n#EXT-X-VERSION:6\n");
+            if (au != null && !au.isStopped()) {
+                b.append("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",")
+                 .append("DEFAULT=YES,AUTOSELECT=YES,URI=\"a.m3u8\"\n");
+            }
+            JSONObject v = rl.stats().optJSONObject("variant");
+            long bw = v == null ? 0 : v.optLong("bw");
+            int w = v == null ? 0 : v.optInt("w");
+            int h = v == null ? 0 : v.optInt("h");
+            String codecs = v == null ? "" : v.optString("codecs");
+            b.append("#EXT-X-STREAM-INF:BANDWIDTH=").append(Math.max(bw, 1000000));
+            if (w > 0 && h > 0) b.append(",RESOLUTION=").append(w).append('x').append(h);
+            if (codecs != null && codecs.length() > 0) b.append(",CODECS=\"").append(codecs).append('"');
+            if (au != null && !au.isStopped()) b.append(",AUDIO=\"aud\"");
+            b.append("\nlive.m3u8\n");
+            Map<String, String> x = new HashMap<String, String>();
+            x.put("Cache-Control", "no-cache");
+            send(out, r, 200, "application/vnd.apple.mpegurl", bytes(b.toString()), x);
+            return;
+        }
+        if (sub.equals("a.m3u8") || sub.startsWith("a/")) {
+            Relay au = relayAudio;
+            if (au == null || au.isStopped()) {
+                send(out, r, 404, "text/plain", bytes("no audio relay"), null);
+                return;
+            }
+            au.lastHit = System.currentTimeMillis();
+            if (sub.equals("a.m3u8")) {
+                String pl = au.playlist();
+                if (pl == null) {
+                    send(out, r, 503, "application/vnd.apple.mpegurl",
+                            bytes("#EXTM3U\n#EXT-X-TARGETDURATION:2\n"), null);
+                    return;
+                }
+                Map<String, String> x = new HashMap<String, String>();
+                x.put("Cache-Control", "no-cache");
+                send(out, r, 200, "application/vnd.apple.mpegurl", bytes(pl), x);
+                return;
+            }
+            String inner = sub.substring(2);          // "seg/N.ts" or "init.mp4"
+            if (inner.equals("init.mp4")) {
+                byte[] d = au.initData();
+                if (d == null) send(out, r, 404, "text/plain", bytes("no init segment"), null);
+                else send(out, r, 200, "audio/mp4", d, null);
+                return;
+            }
+            Matcher am = SEG.matcher(inner);
+            if (am.matches()) {
+                byte[] d;
+                try {
+                    d = au.segment(Long.parseLong(am.group(1)));
+                } catch (Exception e) {
+                    send(out, r, 404, "text/plain", bytes("audio segment: " + e.getMessage()), null);
+                    return;
+                }
+                Map<String, String> x = new HashMap<String, String>();
+                x.put("Cache-Control", "max-age=60");
+                send(out, r, 200, "ts".equals(am.group(2)) ? "video/mp2t" : "audio/mp4", d, x);
+                return;
+            }
+            send(out, r, 404, "text/plain", bytes("not found"), null);
+            return;
+        }
         if (sub.equals("live.m3u8") || sub.equals("index.m3u8")) {
             rl.plHits++;
             String pl = rl.playlist();
