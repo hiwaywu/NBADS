@@ -523,7 +523,7 @@ final class LocalHub {
      * its plain HTML -- the same request a browser makes for that page, nothing
      * spoofed. Null when the page does not name one.
      */
-    private String playerFrame(String mainPage) {
+    String playerFrame(String mainPage) {
         synchronized (frames) {
             Object[] hit = frames.get(mainPage);
             if (hit != null && System.currentTimeMillis() - (Long) hit[0] < 600000) return (String) hit[1];

@@ -62,7 +62,22 @@ public class MainActivity extends Activity {
             "trend48.st", "adcash", "popads", "popcash", "adsterra", "highperformance",
             "hilltopads", "exoclick", "tsyndicate", "profitableratecpm", "onclickalgo",
             "adnium", "clickadu", "galaksion", "revcontent", "taboola", "outbrain",
-            "zedo", "mgid", "trafficjunky", "juicyads", "adspyglass", "ad-maven"
+            "zedo", "mgid", "trafficjunky", "juicyads", "adspyglass", "ad-maven",
+            // seen on game pages 2026-11-07: an ad loader, a tracker, the chat column
+            "cogwayskerb.com", "usrpubtrck.com", "21aims.shop"
+    };
+
+    /**
+     * What the OUTER game page (the Main N page) may load from other sites: code
+     * libraries, fonts, and the player frame. Everything else it asks for is an ad
+     * network -- they rotate domains faster than any list, so for this one page the
+     * rule is an allowlist. Requests made from inside the player are not subject to
+     * it (that is where the video and its licence traffic come from).
+     */
+    private static final String[] PAGE_CDNS = {
+            "cdnjs.cloudflare.com", "code.jquery.com", "ajax.googleapis.com",
+            "fonts.googleapis.com", "fonts.gstatic.com", "www.gstatic.com",
+            "cdn.jsdelivr.net", "unpkg.com", "use.fontawesome.com"
     };
 
 
@@ -80,7 +95,8 @@ public class MainActivity extends Activity {
     // A game's player page is opened as itself (its player host refuses to be
     // framed by any other site), but in this view instead of over the whole app,
     // so the list, the bar and the rest of the app stay on screen.
-    private WebView game;
+    private volatile WebView game;
+    private volatile String gamePage;               // the Main N page in the game view
     private boolean gameFull = false;
     private final int[] gameBox = new int[4];      // x, y, w, h in px
     private WebChromeClient chrome;
@@ -89,13 +105,21 @@ public class MainActivity extends Activity {
     /** In the game view: the player frame fills the view (a stylesheet rule, so a
      *  frame the site re-creates after load is covered too). */
     private static final String FOCUS_PLAYER = "(function(){"
-            + "if(document.getElementById('nbahubFocus'))return;"
+            + "if(!document.getElementById('nbahubFocus')){"
             + "var st=document.createElement('style');st.id='nbahubFocus';"
             + "st.textContent='html,body{background:#000!important;overflow:hidden!important}'"
             + "+'#streamIframe,iframe[allow*=encrypted-media]{position:fixed!important;inset:0!important;"
             + "width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;"
             + "z-index:2147483646!important;border:0!important;background:#000!important}';"
-            + "(document.head||document.documentElement).appendChild(st);"
+            + "(document.head||document.documentElement).appendChild(st);}"
+            // a fixed element is trapped inside any ancestor with contain/transform/
+            // filter (foxiy wraps its player in contain:layout paint) -- undo those on
+            // the player's ancestors, again for a while in case the site rebuilds them
+            + "var n=0;function free(){var f=document.querySelector('#streamIframe,iframe[allow*=encrypted-media]');"
+            + "for(var e=f&&f.parentElement;e&&e!==document.documentElement;e=e.parentElement){"
+            + "e.style.setProperty('contain','none','important');e.style.setProperty('transform','none','important');"
+            + "e.style.setProperty('filter','none','important');e.style.setProperty('will-change','auto','important');}"
+            + "if(++n<15)setTimeout(free,1000);}free();"
             + "})()";
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -194,6 +218,11 @@ public class MainActivity extends Activity {
 
                         @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                if (view == game && outerPageOverreach(req)) {
+                    Log.i(TAG, "page ad blocked: " + req.getUrl());
+                    return new WebResourceResponse("text/plain", "utf-8",
+                            new ByteArrayInputStream(new byte[0]));
+                }
                 try {
                     String u = req.getUrl() != null ? req.getUrl().toString().toLowerCase() : "";
                     for (String h : AD_HOSTS) {
@@ -492,6 +521,7 @@ public class MainActivity extends Activity {
         }
         game.setVisibility(View.VISIBLE);
         setGameBox(x, y, w, h);
+        gamePage = url;
         game.loadUrl(url);
     }
 
@@ -533,12 +563,44 @@ public class MainActivity extends Activity {
         if (game == null) return;
         WebView g = game;
         game = null;
+        gamePage = null;
         if (gameFull) {
             gameFull = false;
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         }
         root.removeView(g);
         try { g.loadUrl("about:blank"); g.destroy(); } catch (Exception ignored) { }
+    }
+
+    /** Runs on WebView's network thread. True = the outer page wants something it has no business loading. */
+    private boolean outerPageOverreach(WebResourceRequest req) {
+        String page = gamePage;
+        if (page == null || req.isForMainFrame() || req.getUrl() == null) return false;
+        String ref = null;
+        java.util.Map<String, String> h = req.getRequestHeaders();
+        if (h != null) for (java.util.Map.Entry<String, String> e : h.entrySet()) {
+            if ("referer".equalsIgnoreCase(e.getKey())) { ref = e.getValue(); break; }
+        }
+        if (ref == null) return false;                      // not from the outer page
+        String pageSite = site(Uri.parse(page).getHost());
+        if (!pageSite.equals(site(Uri.parse(ref).getHost()))) return false;
+        String target = req.getUrl().getHost();
+        if (target == null) return false;
+        target = target.toLowerCase();
+        if (site(target).equals(pageSite)) return false;    // its own files
+        for (String c : PAGE_CDNS) if (target.equals(c)) return false;
+        // the player frame it embeds -- read from the page itself, cached by the hub
+        String frame = hub == null ? null : hub.playerFrame(page);
+        if (frame == null) return false;     // cannot tell the player apart: do not guess
+        String fh = Uri.parse(frame).getHost();
+        return fh == null || !target.equalsIgnoreCase(fh);
+    }
+
+    /** example.co -> example.co, a.b.example.co -> example.co (enough for these hosts). */
+    private static String site(String host) {
+        if (host == null) return "";
+        String[] p = host.toLowerCase().split("\\.");
+        return p.length <= 2 ? host.toLowerCase() : p[p.length - 2] + "." + p[p.length - 1];
     }
 
     private void notifyPage(String js) {
