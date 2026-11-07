@@ -3,10 +3,20 @@
 $ErrorActionPreference = 'Continue'   # native tools write to stderr; check $LASTEXITCODE instead
 
 $root = $PSScriptRoot
-$sdk  = 'C:\Android\Sdk'
+# The SDK is wherever this machine put it: C:\Android\Sdk on the build box, the
+# per-user install on a dev laptop. ANDROID_SDK wins when it is set.
+$sdk  = $env:ANDROID_SDK
+if (-not $sdk -or -not (Test-Path $sdk)) {
+    foreach ($cand in @('C:\Android\Sdk', (Join-Path $env:LOCALAPPDATA 'Android\Sdk'))) {
+        if ($cand -and (Test-Path $cand)) { $sdk = $cand; break }
+    }
+}
+if (-not $sdk -or -not (Test-Path $sdk)) { throw "Android SDK not found (set ANDROID_SDK)" }
 $bt   = Join-Path $sdk 'build-tools\36.0.0'   # 34.0.0 d8 crashes on inner classes
 if (-not (Test-Path $bt)) { $bt = Join-Path $sdk 'build-tools\34.0.0' }
-$jar  = Join-Path $sdk 'platforms\android-35\android.jar'
+$plat = @(Get-ChildItem (Join-Path $sdk 'platforms') -Directory -ErrorAction SilentlyContinue |
+          Sort-Object Name -Descending | Select-Object -First 1)
+$jar  = if ($plat) { Join-Path $plat[0].FullName 'android.jar' } else { Join-Path $sdk 'platforms\android-35\android.jar' }
 $out  = Join-Path $root 'build'
 
 New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -28,7 +38,7 @@ Write-Host '[2/6] linking resources + manifest' -ForegroundColor Cyan
     --manifest "$root\AndroidManifest.xml" -R "$out\res.zip" -A "$out\assets" `
     --java "$out\gen" --auto-add-overlay `
     --min-sdk-version 24 --target-sdk-version 34 `
-    --version-code 4 --version-name 2.0
+    --version-code 5 --version-name 2.1
 if ($LASTEXITCODE -ne 0) { throw 'aapt2 link failed' }
 
 Write-Host '[3/6] compiling java' -ForegroundColor Cyan

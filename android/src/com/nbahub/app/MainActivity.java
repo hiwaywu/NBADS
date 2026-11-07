@@ -42,9 +42,11 @@ import android.widget.Toast;
  *
  * What the shell adds on top of the page:
  *   - video fullscreen through onShowCustomView, so both fullscreen buttons work
- *   - games open in-app on the site's own player page (Widevine granted to it,
- *     popups refused), with the home chip to come back and a Chrome chip if a
- *     stream will not show a picture here
+ *   - games open in-app on the site's own player page (Widevine granted to it),
+ *     with the home chip to come back and a browser chip if the WebView itself
+ *     has no key system
+ *   - window.open() from a player is kept in-app: the popup's URL becomes this
+ *     WebView's page, because a dropped popup is a black screen
  *   - the page's JS console mirrored into logcat
  */
 public class MainActivity extends Activity {
@@ -72,6 +74,26 @@ public class MainActivity extends Activity {
     private FrameLayout root;
     private TextView chip;
     private TextView chromeChip;
+
+    /** Hosts this session has actually talked to: the game page, its frames, its CDNs. */
+    private final java.util.Set<String> knownHosts = java.util.Collections.synchronizedSet(
+            new java.util.HashSet<String>());
+
+    private boolean isAdHost(String url) {
+        if (url == null) return false;
+        String low = url.toLowerCase();
+        for (String h : AD_HOSTS) {
+            if (low.contains(h)) return true;
+        }
+        return false;
+    }
+
+    /** A URL that is plainly part of a player, whatever host it is on. */
+    private boolean isPlayerish(String url) {
+        String low = (url == null ? "" : url).toLowerCase();
+        return low.contains("/main/") || low.contains("/embed") || low.contains("/player")
+                || low.contains("/live") || low.contains("/watch") || low.contains("/secure/");
+    }
 
     private View fullView;
     private WebChromeClient.CustomViewCallback fullCallback;
@@ -111,9 +133,11 @@ public class MainActivity extends Activity {
         s.setTextZoom(100);
         s.setCacheMode(WebSettings.LOAD_NO_CACHE);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        s.setJavaScriptCanOpenWindowsAutomatically(false);
-        // true + onCreateWindow() refusing = popups are dropped. With false, a
-        // window.open() from an ad on a game page would replace the page itself.
+        // Popups must reach onCreateWindow() or the player's media window is lost:
+        // with this false, window.open() from script does nothing at all and the
+        // screen stays black. onCreateWindow() keeps the window the player wants and
+        // files the rest under "ad" by host, which is the part that matters.
+        s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setSupportMultipleWindows(true);
         s.setUserAgentString(s.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION);
 
@@ -140,8 +164,36 @@ public class MainActivity extends Activity {
 
             @Override
             public boolean onCreateWindow(WebView view, boolean dialog, boolean userGesture, android.os.Message msg) {
-                Log.i(TAG, "popup blocked");
-                return false;
+                // The mirror players open their media window with window.open(). The old
+                // answer was "no": the popup was dropped and the app showed a black
+                // rectangle, which is why the stream only ever played after handing the
+                // page to a browser. Instead, catch the window the moment it names a URL
+                // and put that URL in this WebView, so the picture stays in the app.
+                final WebView pop = new WebView(MainActivity.this);
+                pop.getSettings().setJavaScriptEnabled(true);
+                pop.getSettings().setDomStorageEnabled(true);
+                pop.setWebViewClient(new WebViewClient() {
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                        takePopup(v, r.getUrl() == null ? "" : r.getUrl().toString());
+                        return true;
+                    }
+
+                    @SuppressWarnings("deprecation")
+                    @Override
+                    public boolean shouldOverrideUrlLoading(WebView v, String u) {
+                        takePopup(v, u);
+                        return true;
+                    }
+
+                    @Override
+                    public void onPageStarted(WebView v, String u, android.graphics.Bitmap fav) {
+                        if (u != null && u.startsWith("http")) takePopup(v, u);
+                    }
+                });
+                ((WebView.WebViewTransport) msg.obj).setWebView(pop);
+                msg.sendToTarget();
+                return true;
             }
 
             @Override
@@ -180,16 +232,18 @@ public class MainActivity extends Activity {
                 if (url != null && !isHome(url)) kickPlayback(view);
             }
 
-                        @Override
+            @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
                 try {
-                    String u = req.getUrl() != null ? req.getUrl().toString().toLowerCase() : "";
-                    for (String h : AD_HOSTS) {
-                        if (u.contains(h)) {
-                            Log.i(TAG, "ad blocked: " + u);
-                            return new WebResourceResponse("text/plain", "utf-8",
-                                    new ByteArrayInputStream(new byte[0]));
-                        }
+                    String u = req.getUrl() != null ? req.getUrl().toString() : "";
+                    String low = u.toLowerCase();
+                    String host = req.getUrl() != null && req.getUrl().getHost() != null
+                            ? req.getUrl().getHost().toLowerCase() : "";
+                    if (host.length() > 0) knownHosts.add(host);
+                    if (isAdHost(low)) {
+                        Log.i(TAG, "ad blocked: " + low);
+                        return new WebResourceResponse("text/plain", "utf-8",
+                                new ByteArrayInputStream(new byte[0]));
                     }
                 } catch (Exception e) { }
                 return null;
@@ -217,20 +271,26 @@ public class MainActivity extends Activity {
                 String scheme = u == null ? null : u.getScheme();
                 if (scheme == null) return false;
                 if (scheme.startsWith("http")) {
-                    // The page we opened may move around inside its own hosts, and our hub is
-                    // always fine. Anything else is an ad landing page wearing the costume of a
-                    // stream, and it must not take the screen - that is what made the app look
-                    // like it "left" and showed a wall of ads.
+                    String url = u.toString();
                     String host = u.getHost() == null ? "" : u.getHost().toLowerCase();
                     String cur = view.getUrl() == null ? "" : view.getUrl();
                     String curHost = "";
                     try { curHost = Uri.parse(cur).getHost(); } catch (Exception e) { }
                     if (curHost == null) curHost = "";
-                    if (isHome(u.toString())) return false;
+                    if (isHome(url)) return false;
+                    // an ad host is an ad host, whoever asks for it
+                    if (isAdHost(url)) { Log.i(TAG, "nav blocked (ad host): " + url); return true; }
+                    // The old rule was "same host or nothing", and that is what kept a
+                    // game from playing here: the player page hands the picture to a
+                    // host of its own, the navigation was refused, and the app stayed
+                    // black until the page was opened in a browser. A tap is a tap --
+                    // hasGesture() is the difference between the user pressing play and
+                    // a script dragging the screen to an ad landing page.
+                    if (req.hasGesture()) return false;
                     if (host.equalsIgnoreCase(curHost)) return false;
-                    if (host.contains("foxiy") || host.contains("methstreams")
-                            || host.contains("methfoxiy") || host.contains("nbahub")) return false;
-                    Log.i(TAG, "nav blocked: " + u);
+                    if (knownHosts.contains(host)) return false;
+                    if (isPlayerish(url)) return false;
+                    Log.i(TAG, "nav blocked (no gesture, unknown host): " + url);
                     return true;
                 }
                 try {
@@ -268,9 +328,11 @@ public class MainActivity extends Activity {
         clp.setMargins(0, 0, 4, 0);
         root.addView(chip, clp);
 
-        // the escape hatch for a game page: the same page in Chrome
+        // the escape hatch for a game page: the same page in the browser that is
+        // actually installed, named honestly (the chip used to say "Chrome" even
+        // when Chrome was not the browser it was going to open)
         chromeChip = new TextView(this);
-        chromeChip.setText("Chrome");
+        chromeChip.setText(browserLabel());
         chromeChip.setTextSize(11);
         chromeChip.setTextColor(Color.parseColor("#d9ffe8"));
         chromeChip.setGravity(Gravity.CENTER);
@@ -299,6 +361,43 @@ public class MainActivity extends Activity {
         setContentView(root);
         goFullscreen();
         openFromIntent(getIntent());
+    }
+
+    /**
+     * A window.open() from a player page: keep it in-app.
+     *
+     * Read as a rule, not a guess -- an ad host in the URL means drop it, anything
+     * else means the player is asking for the window its picture lives in, so load
+     * it in the main WebView. That is the whole difference between "the video does
+     * not play in the app" and "it plays here".
+     */
+    private void takePopup(WebView from, String url) {
+        if (url == null || url.isEmpty()) return;
+        String low = url.toLowerCase();
+        if (!low.startsWith("http")) return;
+        if (isHome(url)) { destroyPopup(from); return; }
+        if (isAdHost(url)) {
+            Log.i(TAG, "popup ad dropped: " + url);
+            destroyPopup(from);
+            return;
+        }
+        Log.i(TAG, "popup kept in-app: " + url);
+        // Destroying a WebView from inside its own navigation callback can abort the
+        // load the popup was in the middle of (and, on a slow device, take the renderer
+        // with it). Let the callback return first.
+        final WebView dead = from;
+        if (dead != null && dead != web) {
+            dead.postDelayed(new Runnable() {
+                public void run() { destroyPopup(dead); }
+            }, 700);
+        }
+        if (web != null) web.loadUrl(url);
+    }
+
+    private void destroyPopup(WebView pop) {
+        try {
+            if (pop != null) { pop.stopLoading(); pop.destroy(); }
+        } catch (Exception ignored) { }
     }
 
     /** Start the player on a page we did not write: mute, click, play, repeat. */
@@ -395,8 +494,22 @@ public class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- nav
 
-    /** Deep link: adb shell am start -n com.nbahub.app/.MainActivity --es chan 0 */
+    /**
+     * Deep links:
+     *   adb shell am start -n com.nbahub.app/.MainActivity --es chan 0
+     *   adb shell am start -n com.nbahub.app/.MainActivity --es url https://host/main/1
+     *
+     * The url form exists so a page can be put in front of the app's WebView
+     * without going through the schedule -- that is how the in-app playback
+     * behaviour is tested against a local fixture.
+     */
     private void openFromIntent(Intent intent) {
+        String direct = intent == null ? null : intent.getStringExtra("url");
+        if (direct != null && direct.startsWith("http")) {
+            Log.i(TAG, "deep link url: " + direct);
+            web.loadUrl(direct);
+            return;
+        }
         String chan = intent == null ? null : intent.getStringExtra("chan");
         if (chan != null && chan.matches("\\d+")) web.loadUrl(home + "?chan=" + chan);
         else goHome();
@@ -433,9 +546,9 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------- browser
 
     /**
-     * Games are Widevine: they decrypt in a real browser, not in this WebView.
-     * The system default is whatever was installed last (Edge on many phones),
-     * so ask for Chrome, then Firefox, then let the user choose.
+     * Games are Widevine. This WebView can decrypt them when the device ships a
+     * CDM and the page is a secure context; when it cannot, the chip is the way
+     * out, and it names the browser it will actually use.
      */
     private static final String[] BROWSER_PACKAGES = {
             "com.android.chrome",
@@ -444,6 +557,24 @@ public class MainActivity extends Activity {
             "org.mozilla.firefox_beta",
             "com.brave.browser",
     };
+
+    private static final String[][] BROWSER_NAMES = {
+            {"com.android.chrome", "Chrome"},
+            {"com.chrome.beta", "Chrome beta"},
+            {"org.mozilla.firefox", "Firefox"},
+            {"org.mozilla.firefox_beta", "Firefox beta"},
+            {"com.brave.browser", "Brave"},
+    };
+
+    /** The name of the browser the chip will open, as installed on this phone. */
+    private String browserLabel() {
+        for (String[] row : BROWSER_NAMES) {
+            try {
+                if (getPackageManager().getLaunchIntentForPackage(row[0]) != null) return row[1];
+            } catch (Exception ignored) { }
+        }
+        return "browser";
+    }
 
     private void openInBrowser(String url) {
         Uri uri = Uri.parse(url);
@@ -551,7 +682,7 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (intent != null && intent.hasExtra("chan")) openFromIntent(intent);
+        if (intent != null && (intent.hasExtra("chan") || intent.hasExtra("url"))) openFromIntent(intent);
     }
 
     @Override

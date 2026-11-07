@@ -248,9 +248,9 @@ body{transition:none!important}
     <div id="idle">
       <h1>pick something below</h1>
       <p><b>NBA TV</b> plays right here at full quality, buffered locally.<br>
-         A <b>game</b> opens its stream in its own player window.</p>
+         A <b>game</b> plays right here too, in its own player page.</p>
     </div>
-    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock" allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
+    <iframe id="pf" sandbox="allow-scripts allow-same-origin allow-forms allow-presentation allow-orientation-lock allow-modals allow-downloads" allow="autoplay *; fullscreen *; encrypted-media *; picture-in-picture *" allowfullscreen referrerpolicy="no-referrer-when-downgrade" style="display:none;position:absolute;inset:0;width:100%;height:100%;border:0;background:#000"></iframe>
     <button id="reloadStream" style="display:none;position:absolute;top:10px;right:12px;z-index:6;background:rgba(20,22,26,.86);border:1px solid #2c3038;color:#c9cdd6;border-radius:7px;padding:6px 11px;font:12px -apple-system,Segoe UI,sans-serif;cursor:pointer;opacity:.5">&#8635; reload stream</button>
     <div id="spinner"><div class="ring"></div><span id="spintext">working...</span></div>
     <div id="unmute">tap for sound</div>
@@ -285,6 +285,28 @@ const IN_APP = /NBAHubApp/.test(navigator.userAgent);
 // exposes MediaKeys at all; Android WebView frequently ships without it, which
 // is the black-rectangle case. Know the answer before we navigate.
 const CAN_DRM = (typeof navigator.requestMediaKeySystemAccess === 'function') && window.isSecureContext;
+let _drmAnswer = null;
+// Ask the CDM directly instead of trusting "is EME a function". A browser with
+// EME but no Widevine key system cannot show these feeds, and saying so up front
+// is better than a black rectangle with no explanation.
+async function drmState(timeout){
+  if (_drmAnswer !== null) return _drmAnswer;
+  if (!navigator.requestMediaKeySystemAccess) { _drmAnswer = false; return false; }
+  const probe = (async () => {
+    try {
+      await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+        initDataTypes: ['cenc'],
+        videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }]
+      }]);
+      return true;
+    } catch(e){ return false; }
+  })();
+  try {
+    const r = await Promise.race([probe, new Promise(res => setTimeout(() => res(null), timeout || 2500))]);
+    if (r !== null) _drmAnswer = r;
+    return r;
+  } catch(e){ _drmAnswer = false; return false; }
+}
 const APP = { diag: null };
 // The standalone phone app opens a game's own player page inside the app (its
 // WebView grants Widevine). It cannot frame the player in this page: the player
@@ -820,6 +842,50 @@ async function reportFreeze(){
 
 let lastGame = null;
 
+// One place that opens the player frame, and one guard on it. A framed copy of a
+// player page is still a page somebody else wrote: it can navigate itself to an
+// ad wall or a "update your browser" screen. The proxy is our own origin, so the
+// frame's URL is readable -- if it is no longer a proxy URL, put the player back.
+let pfGoodSrc = '';
+function pfOpen(u){
+  pfGoodSrc = u;
+  pfRestores = 0;
+  const pf = $('#pf');
+  if (pf) pf.src = u;
+}
+let pfRestores = 0;
+(function(){
+  const pf = $('#pf');
+  if (!pf) return;
+  pf.addEventListener('load', function(){
+    let href = '';
+    try { href = this.contentWindow.location.href; } catch(e){ return; }
+    if (!href || href === 'about:blank' || href.indexOf('about:') === 0) return;
+    if (href.indexOf('/play?u=') >= 0 || href.indexOf('/watch?u=') >= 0) return;
+    if (!pfGoodSrc || pfRestores >= 3) return;
+    pfRestores++;
+    this.src = pfGoodSrc;
+    toast('that page tried to leave the player - put it back', 2400);
+  });
+})();
+
+// The site's player may hand its media window to window.open(). A sandboxed
+// frame is not allowed to create one, and a popup would be exactly the "leave
+// the app" behaviour we are removing, so the patch that ships with every
+// proxied page posts the URL here instead: same picture, same frame, no window.
+window.addEventListener('message', function(ev){
+  const d = ev.data;
+  if (!d || typeof d !== 'object' || !d.nba_popup) return;
+  const u = String(d.nba_popup);
+  if (!/^https?:\/\//i.test(u)) return;
+  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+  document.body.classList.add('iframeMode');
+  $('#pf').style.display = 'block';
+  pfOpen('/play?u=' + encodeURIComponent(u) +
+         '&r=' + encodeURIComponent(d.nba_ref || '') + '&_=' + Date.now());
+  toast('the player asked for a window - showing it here', 2600);
+});
+
 async function watchGame(g){
   lastGame = g;
   setSpin(true, 'finding the feed that actually plays...');
@@ -857,6 +923,11 @@ async function watchGame(g){
     let j = null;
     try { j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json()); } catch(e){}
     setSpin(false);
+    // A phone's WebView can decrypt these feeds only when it has a Widevine key
+    // system; know that before promising a picture, instead of showing a black
+    // rectangle and leaving the browser chip as the only way out.
+    if (await drmState(2000) === false)
+      toast('this webview reports no Widevine key system - if it stays black, the browser chip plays it', 6500);
     // standalone: the "Main N" page itself, which embeds its player the way the
     // player host allows; the frame alone refuses to play outside its own sites
     const target = (j && (STANDALONE ? (j.browser || j.open) : (j.open || j.frame))) || g.url;
@@ -894,12 +965,18 @@ async function watchGame(g){
     const j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json());
     const target = j.open || j.frame;
     if (!(j && j.ok && target)) { toast('no working feed found for this game right now', 4500); setSpin(false); return; }
+    if (await drmState(2500) === false)
+      toast('this browser has no Widevine key system - the picture will stay black', 6000);
     const pf = $('#pf');
     if (hls){ hls.destroy(); hls = null; }
     document.body.classList.remove('playing');
     document.body.classList.add('iframeMode');
     pf.style.display = 'block';
-    pf.src = '/play?u=' + encodeURIComponent(target) + '&_=' + Date.now();
+    // r=<event page>: the Referer the upstream player expects. The hub makes the
+    // request itself, so this is the identity it leaves with -- and the window
+    // never has to hand the game off to a browser.
+    pfOpen('/play?u=' + encodeURIComponent(target) +
+           '&r=' + encodeURIComponent(g.url) + '&_=' + Date.now());
     const srcPill = $('#pillSrc');
     if (srcPill){
       let h = ''; try { h = new URL(target).hostname; } catch(e){}
@@ -996,7 +1073,7 @@ $('#reloadStream').onclick = () => {
   const pf = $('#pf');
   const base = (pf.getAttribute('src') || '').split('&_=')[0];
   if (!base) return;
-  pf.src = base + '&_=' + Date.now();
+  pfOpen(base + '&_=' + Date.now());
   toast('reloading stream', 1800);
 };
 

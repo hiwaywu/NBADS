@@ -488,3 +488,91 @@ Next steps, in the order they would pay off:
    `MainActivity` with the same host list as `harvest.py`.
 4. **Playwright parity in the APK** (huge; better to leave game harvesting to the PC and keep the
    phone on the site's player).
+
+---
+
+## 2.1 -- "the video does not play in the app window"
+
+Symptom, both shells: the game page loads, the player frame appears, no picture. Press the
+browser button and the same page plays. The site was never the problem; the transport was.
+
+Four independent faults, each sufficient on its own:
+
+1. **No `do_POST`.** `Handler` had `do_GET` / `do_HEAD` / `do_OPTIONS`. A Widevine licence
+   acquisition is `POST` with an octet-stream body, and `BaseHTTPRequestHandler` answers
+   `501 Unsupported method` to anything else. The player asked, the hub said 501, no key,
+   black picture, no console error that names it. Fixed with `do_POST`/`do_PUT`/`do_PATCH`/
+   `do_DELETE` and a `_body()` that also decodes chunked uploads (a `fetch()` with a stream
+   body has no `Content-Length`).
+2. **The proxy was a fetcher, not a proxy.** `_passthrough` built a bare GET: no method, no
+   body, no `Content-Type`, no `Origin`, and it flattened every upstream status to 200. A
+   licence server sees `Origin: http://127.0.0.1:8790` and refuses; a ranged media request
+   sees 200 and a whole file. Now: method + body + `COPY_UP`/`COPY_DOWN` headers, real
+   status, `Set-Cookie` with `Domain`/`Secure`/`SameSite=None` stripped so the browser will
+   store it for the hub host, and redirects rewritten back into `/ext`.
+3. **Nested frames escaped the proxy.** `proxy_page` inserted `<base href>` and patched
+   `fetch`/`XHR`, but left `<iframe src>` alone, so the player's own frame loaded from the
+   site with the hub as its parent: `X-Frame-Options: SAMEORIGIN` or "This stream is not
+   available here". `rehost_frames()` rewrites every `iframe`/`frame` `src`, and the injected
+   script does the same at runtime for frames created by JS and for `srcdoc` documents.
+4. **`window.open()` had nowhere to go.** `#pf` is sandboxed without `allow-popups`, so the
+   call returns `null`; mirrors that open their media window that way showed nothing. The
+   patch now posts the URL to the hub page, which loads it in the same frame (and the Android
+   shell does the same job in `onCreateWindow`).
+
+Traps worth keeping in the file:
+
+- **`<base href>` eats relative proxy URLs.** The first version emitted `src="/play?u=..."`,
+  which the page's own `<base>` resolved against the *site*, 404'd there, and the failure
+  looked exactly like "the site refuses to be framed". Every proxy URL handed to a proxied
+  page must be absolute (`http://<hub host>/play?u=...`), which is why `proxy_page` takes
+  `hub_origin`.
+- **A sandboxed frame keeps the real `top`.** `Object.defineProperty(window, 'top', ...)`
+  works in a normal page (frame-busters are defused silently) but is refused inside `#pf`'s
+  sandbox, so the buster *does* fire -- and the sandbox refuses the navigation, which is the
+  outcome we want but logs an "Unsafe attempt to initiate navigation" error. Do not treat that
+  console line as a regression; assert it.
+- **A click on the picture is a pause toggle.** The autostart script used to click the
+  `<video>` on every retry; on two of these players that pauses the stream it just started.
+  Click the overlay and the play buttons, never the video more than twice.
+- **`Origin` on a same-origin GET is a lie that CDNs notice.** Only uploads get an invented
+  `Origin`; a GET without one stays without one.
+- **Fixtures need a looping clip.** `docs/white1080.mp4` is three seconds; the first harness
+  version "failed" because the video had already ended by the time it polled.
+
+### The Android half: three gates, one of them a callback
+
+The phone had the same symptom for a different reason -- it does not use `/play` at all, it
+loads the site's own page in a WebView:
+
+1. **`onCreateWindow()` returned `false`.** `setSupportMultipleWindows(true)` +
+   `setJavaScriptCanOpenWindowsAutomatically(false)` + a refusing `onCreateWindow` meant every
+   `window.open()` was dropped. The mirrors that put their media in a popup therefore had nowhere
+   to put the picture. Now the popup is given a throwaway WebView, its first `http(s)` URL is
+   taken, and that URL is loaded in the main WebView (`takePopup`). Ad hosts in that list are
+   still dropped.
+2. **The navigation guard was "same host or nothing".** A player that hands the picture to
+   another host of the same site (`/main/1` -> `player-*.sytes.net`) was treated as an ad landing
+   page, refused, and the app stayed black while a browser played it. The rule is now:
+   known ad host -> block; `request.hasGesture()` -> allow (a tap is a tap); same host or a host
+   this session has already talked to -> allow; a URL that names a player (`/main/`, `/embed`,
+   `/player`, `/live`, `/secure/`) -> allow; anything else with no gesture -> block.
+3. **The popup WebView was destroyed inside its own callback.** `takePopup` called
+   `pop.destroy()` from within `shouldOverrideUrlLoading`, which occasionally aborted the load
+   the popup was mid-way through and lost the handoff. It is now `postDelayed(700)`.
+
+Two consequences worth remembering:
+
+- `setJavaScriptCanOpenWindowsAutomatically` must be **true** for a script-opened popup to reach
+  `onCreateWindow` at all. The old comment said the opposite, and the comment was wrong.
+- A phone's WebView cannot be driven over CDP unless the app is `debuggable`, so the harness makes
+  the *page* report on itself: `fixture_stream.py` serves a page that beacons
+  `path/url/currentTime/readyState/videoWidth/videoHeight/UA` to `/report` once its `<video>` is
+  really moving. That is the evidence, and it names the app in the UA, so a browser cannot fake it.
+
+Emulator recipe (no device needed):
+
+```powershell
+$sdk\emulator\emulator.exe -avd NovelAI_Pixel -no-snapshot -no-audio -gpu swiftshader_indirect
+python tools/verify_android_inapp.py            # 10/10, screenshot written to docs/
+```

@@ -728,8 +728,11 @@ SHELL_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8">
 </body></html>"""
 
 
-def shell_page(src):
-    return SHELL_HTML.replace("__SRC__", src.replace('"', "&quot;"))
+def shell_page(src, referer=""):
+    inner = "/play?u=" + urllib.parse.quote(src, safe="")
+    if referer:
+        inner += "&r=" + urllib.parse.quote(referer, safe="")
+    return SHELL_HTML.replace("__SRC__", _attr(inner))
 
 
 # ------------------------------------------------------------------ page wrapper
@@ -756,16 +759,40 @@ HIDE_CSS = """
 PATCH_JS = """
 <script id="nbacleanjs">
 (function () {
-  var P = location.origin + '/ext?u=';
+  // Runs inside every document the hub serves from a stream site: the page
+  // itself, each nested player frame, and each srcdoc frame. Four jobs:
+  //
+  //   1. keep every subresource inside the proxy, so the request leaves with the
+  //      site's own Referer/Origin instead of the hub's
+  //   2. defuse the frame-busters ("if (top !== self) top.location = ..."), which
+  //      is what made the site refuse to stay in an app window
+  //   3. answer document.referrer with the upstream page, not the hub
+  //   4. let window.open() play the picture here instead of in a popup a sandboxed
+  //      frame is not allowed to create
+  var ORIGIN = location.origin;
+  var ME = (window.__nbaSelf || location.href);
+  var UPREF = (window.__nbaRef || '');
+  var REAL_TOP = window.top;
+  var P = ORIGIN + '/play?u=';
+  var E = ORIGIN + '/ext?u=';
+
+  function isMine(u) { return !!u && u.indexOf(ORIGIN) === 0; }
+  function abs(u) { try { return new URL(u, document.baseURI).href; } catch (e) { return ''; } }
   function wrap(u) {
     try {
       if (!u || typeof u !== 'string') return u;
       if (/^(data|blob|about|javascript):/i.test(u)) return u;
-      if (u.indexOf(location.origin) === 0) return u;
-      return P + encodeURIComponent(new URL(u, document.baseURI).href);
+      if (isMine(u)) return u;
+      return E + encodeURIComponent(new URL(u, document.baseURI).href)
+             + '&r=' + encodeURIComponent(UPREF || ME);
     } catch (e) { return u; }
   }
   window.__nbaWrap = wrap;
+  window.__nbaPlayUrl = function (u) {
+    return P + encodeURIComponent(u) + '&r=' + encodeURIComponent(UPREF || ME);
+  };
+
+  // ---- 1. subresources -------------------------------------------------
   var _fetch = window.fetch;
   window.fetch = function (input, init) {
     try {
@@ -782,6 +809,119 @@ PATCH_JS = """
   if (navigator.serviceWorker) {
     try { navigator.serviceWorker.register = function () { return Promise.reject('blocked'); }; } catch (e) {}
   }
+
+  // ---- 2. frame-busters ------------------------------------------------
+  // A player page that notices it is framed navigates the top window away, or
+  // blanks itself. Both checks are "am I the top document"; make that true.
+  // defineProperty first (the spec makes top [Replaceable]), then a plain
+  // assignment for the engines where the getter refuses to be shadowed.
+  var shimmed = false;
+  try {
+    Object.defineProperty(window, 'top', {
+      configurable: true, get: function () { return window.self; }
+    });
+    shimmed = (window.top === window.self);
+  } catch (e) {}
+  if (!shimmed) {
+    try { window.top = window.self; shimmed = (window.top === window.self); } catch (e) {}
+  }
+  try { document.documentElement.setAttribute('data-nba-top', shimmed ? 'self' : 'real'); } catch (e) {}
+  try {
+    Object.defineProperty(window, 'frameElement', {
+      configurable: true, get: function () { return null; }
+    });
+  } catch (e) {}
+
+  // ---- 3. document.referrer --------------------------------------------
+  if (UPREF) {
+    try {
+      Object.defineProperty(document, 'referrer', {
+        configurable: true, get: function () { return UPREF; }
+      });
+    } catch (e) {}
+  }
+
+  // ---- 4. window.open ---------------------------------------------------
+  var fakeWin = null;
+  function fakeWindow() {
+    var w = {
+      closed: false, name: '', opener: window.self,
+      focus: function () {}, blur: function () {}, close: function () { w.closed = true; },
+      postMessage: function (m, o) { try { REAL_TOP.postMessage(m, '*'); } catch (e) {} }
+    };
+    w.self = w; w.window = w;
+    w.location = {
+      assign: function (u) { go(u); }, replace: function (u) { go(u); }, set href(u) { go(u); },
+      toString: function () { return 'about:blank'; }
+    };
+    w.document = { write: function () {}, writeln: function () {}, close: function () {} };
+    return w;
+  }
+  function go(u) {
+    var a = abs(u);
+    if (!a || /^(data|blob|about|javascript):/i.test(a)) return;
+    if (REAL_TOP && REAL_TOP !== window) {
+      try {
+        REAL_TOP.postMessage({ nba_popup: a, nba_ref: UPREF || ME }, '*');
+        return;
+      } catch (e) {}
+    }
+    location.replace(window.__nbaPlayUrl ? window.__nbaPlayUrl(a) : a);
+  }
+  window.open = function (u) {
+    if (!fakeWin) fakeWin = fakeWindow();
+    if (u) go(u);
+    return fakeWin;
+  };
+
+  // ---- 5. keep nested frames in the proxy ------------------------------
+  // Their own <iframe> is the thing the player hosts refuse to render for a
+  // foreign parent. Served through /play it is a same-origin page of ours, with
+  // the site's Referer on the way out.
+  var REHOSTED = '__nbaRehosted';
+  function rehost(el) {
+    if (!el || el.nodeType !== 1) return;
+    var tag = (el.tagName || '').toLowerCase();
+    if (tag !== 'iframe' && tag !== 'frame') return;
+    var sd = el.getAttribute('srcdoc');
+    if (sd !== null && sd !== undefined && el.getAttribute(REHOSTED) !== '1') {
+      el.setAttribute(REHOSTED, '1');
+      var seed = '<base href="' + document.baseURI + '"><script>window.__nbaRef='
+        + JSON.stringify(UPREF) + ';window.__nbaSelf=window.location.href;<\\/script>';
+      el.setAttribute('srcdoc', seed + sd);
+      return;
+    }
+    var s = el.getAttribute('src');
+    if (!s || isMine(s) || el.getAttribute(REHOSTED) === '1') return;
+    if (s.indexOf('/play?u=') >= 0 || s.indexOf('/ext?u=') >= 0) return;   // already ours
+    var a = abs(s);
+    if (!a || !/^https?:/i.test(a)) return;
+    el.setAttribute(REHOSTED, '1');
+    el.setAttribute('src', window.__nbaPlayUrl(a));
+  }
+  function rehostAll(root) {
+    try {
+      var list = (root || document).querySelectorAll('iframe, frame');
+      for (var i = 0; i < list.length; i++) rehost(list[i]);
+    } catch (e) {}
+  }
+  try {
+    new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes || [];
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (n.nodeType === 1) {
+            rehost(n);
+            if (n.querySelectorAll) rehostAll(n);
+          }
+        }
+      }
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { rehostAll(); });
+  } else { rehostAll(); }
 })();
 </script>
 """
@@ -791,28 +931,38 @@ AUTOPLAY_JS = """
 <script id="nbaautoplay">
 (function () {
   // The click that opened this page is the gesture, but it does not travel into a
-  // new document, so the player sits on its poster. Mute it, click the overlay and
-  // call play() again over the first seconds until the picture actually moves.
-  var tries = 0, kicked = false;
+  // new document, so the player sits on its poster. Mute it, press its own play
+  // control, and call play() again over the first seconds until the picture
+  // actually moves. The video element itself is never clicked twice: on most of
+  // these players a click on the picture is a pause toggle, which is how an
+  // "autostart" ended up leaving a black frame on screen.
+  var tries = 0, kicked = false, clickedVideo = 0;
+  var WANT = ['.play', '.play-button', '.btn-play', '[class*="play-button"]',
+              '[id*="play-button"]', '[aria-label*="lay"]', '.poster', '.overlay',
+              '[class*="poster"]', '[id*="play"]', '[class*="play"]'];
+  function vid() { return document.querySelector('video'); }
   function kick() {
     tries++;
-    var v = document.querySelector('video');
+    var v = vid();
     if (v) {
       try { v.muted = true; } catch (e) {}
       try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
+    }
+    if (v && v.paused && clickedVideo < 2) {
+      clickedVideo++;
       try { v.click(); } catch (e) {}
     }
-    var sels = ['.play', '.play-button', '.btn-play', '[class*="play"]', '[id*="play"]',
-                '.overlay', '.poster', '[class*="poster"]', 'button'];
-    for (var i = 0; i < sels.length; i++) {
-      var els = document.querySelectorAll(sels[i]);
-      for (var j = 0; j < els.length && j < 4; j++) {
+    for (var i = 0; i < WANT.length; i++) {
+      var els;
+      try { els = document.querySelectorAll(WANT[i]); } catch (e) { continue; }
+      for (var j = 0; j < els.length && j < 3; j++) {
         var el = els[j];
-        if (!el || el.disabled) continue;
+        if (!el || el.disabled || el === v) continue;
         try { el.click(); } catch (e) {}
       }
     }
-    if (v && v.readyState >= 3 && !v.paused) {
+    // EME players reset the element after a key error: nudge it again
+    if (v && !v.paused) {
       kicked = true;
       try { document.documentElement.setAttribute('data-nbaautoplay', 'playing'); } catch (e) {}
       try {
@@ -822,42 +972,99 @@ AUTOPLAY_JS = """
           + 'background:rgba(20,22,26,.9);border:1px solid #2c3038;color:#c9cdd6;'
           + 'border-radius:8px;padding:8px 12px;font:13px -apple-system,Segoe UI,sans-serif;'
           + 'pointer-events:none';
-        document.body.appendChild(b);
+        (document.body || document.documentElement).appendChild(b);
         setTimeout(function () { b.remove(); }, 6000);
       } catch (e) {}
       try {
         document.addEventListener('click', function once() {
-          try { var vv = document.querySelector('video'); if (vv) { vv.muted = false; vv.play(); } } catch (e) {}
+          try { var vv = vid(); if (vv) { vv.muted = false; vv.play(); } } catch (e) {}
           document.removeEventListener('click', once);
         });
       } catch (e) {}
     }
-    if (tries < 20 && !kicked) setTimeout(kick, 900);
+    if (tries < 24 && !kicked) setTimeout(kick, 800);
   }
   try { document.documentElement.setAttribute('data-nbaautoplay', 'armed'); } catch (e) {}
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () { setTimeout(kick, 400); });
-  } else { setTimeout(kick, 400); }
+    document.addEventListener('DOMContentLoaded', function () { setTimeout(kick, 350); });
+  } else { setTimeout(kick, 350); }
 })();
 </script>
 """
 
 
-def proxy_page(url):
-    req = urllib.request.Request(url)
-    req.add_header("User-Agent", UA)
-    req.add_header("Accept", "text/html,application/xhtml+xml")
-    req.add_header("Accept-Encoding", "identity")
-    req.add_header("Referer", url)
-    with urllib.request.urlopen(req, timeout=25) as r:
-        raw = r.read().decode("utf-8", "replace")
+def _attr(u):
+    return (u or "").replace("&", "&amp;").replace('"', "&quot;")
 
-    p = urllib.parse.urlparse(url)
-    base = f"{p.scheme}://{p.netloc}/"
-    inject = f'<base href="{base}">' + HIDE_CSS + PATCH_JS + AUTOPLAY_JS
+
+FRAME_SRC = re.compile(r'(?is)(<(?:i?frame)\b[^>]*?\bsrc\s*=\s*)(["\'])(.*?)\2')
+
+
+def rehost_frames(raw, doc_url, hub_origin=""):
+    """Point every nested player frame at /play instead of at the site.
+
+    The sites refuse to render their player for a foreign parent -- either with
+    X-Frame-Options / frame-ancestors (which only our own response can waive) or
+    with a Referer check that answers "This stream is not available here". A
+    frame served by /play is a page of ours: no XFO applies, and the request we
+    make for it carries the site's Referer. That is the difference between a
+    black box and a picture.
+
+    The replacement is absolute on purpose: the page carries a <base> pointing at
+    the site, so a root-relative "/play?u=..." would resolve to the SITE's /play
+    and 404 there.
+    """
+    prefix = (hub_origin or "").rstrip("/")
+
+    def repl(m):
+        src = (m.group(3) or "").strip()
+        if not src or src.startswith(("data:", "blob:", "about:", "javascript:")):
+            return m.group(0)
+        if "/play?u=" in src or "/ext?u=" in src:
+            return m.group(0)
+        try:
+            absolute = urllib.parse.urljoin(doc_url, src)
+        except Exception:
+            return m.group(0)
+        if not absolute.startswith(("http://", "https://")):
+            return m.group(0)
+        proxied = (prefix + "/play?u=" + urllib.parse.quote(absolute, safe="") +
+                   "&r=" + urllib.parse.quote(doc_url, safe=""))
+        return m.group(1) + m.group(2) + _attr(proxied) + m.group(2)
+
+    return FRAME_SRC.sub(repl, raw)
+
+
+def proxy_page(url, referer=None, hub_origin=""):
+    """The site's page, served as ours: our frame rules, their content.
+
+    `referer` is the upstream page this document is embedded in. It becomes the
+    Referer of the upstream fetch, the value document.referrer answers with
+    inside the page, and the parent of any frame the page itself creates.
+    `hub_origin` (e.g. http://127.0.0.1:8790) makes every rewritten frame URL
+    absolute, because the page's own <base> would otherwise swallow it.
+    """
+    ref = referer if (referer and not our_own(referer)) else ""
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", PROXY_UA)
+    req.add_header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    req.add_header("Accept-Language", "en-US,en;q=0.9")
+    req.add_header("Accept-Encoding", "identity")
+    req.add_header("Referer", ref or url)
+    org = scheme_host(ref or url)
+    if org:
+        req.add_header("Origin", org)
+    with urllib.request.urlopen(req, timeout=30) as r:
+        raw = r.read().decode("utf-8", "replace")
+        final = r.geturl() or url
 
     # never let their CSP or frame rules apply to our copy
     raw = re.sub(r'(?is)<meta[^>]+http-equiv=["\']?(content-security-policy)["\']?[^>]*>', "", raw)
+    raw = rehost_frames(raw, final, hub_origin)
+
+    seed = ("<script>window.__nbaRef=%s;window.__nbaSelf=%s;</script>"
+            % (json.dumps(ref or final), json.dumps(final)))
+    inject = (f'<base href="{_attr(final)}">' + seed + HIDE_CSS + PATCH_JS + AUTOPLAY_JS)
 
     m = re.search(r"(?is)<head[^>]*>", raw)
     if m:
@@ -998,6 +1205,80 @@ def LogRelay(msg):
     print(f"[hub] {msg}", flush=True)
 
 
+# --------------------------------------------------------- upstream identity
+# The player pages and their licence servers do not only check the frame: they
+# check who is asking. Three strings carry that identity, and the proxy has to
+# rewrite every one of them or the request is refused even though it arrives:
+#
+#   Referer  the page the request came from (their own site, never 127.0.0.1)
+#   Origin   the site the licence token was issued to
+#   method   POST -- a licence challenge is a body upload, not a GET
+#
+# A request from the hub therefore leaves with the upstream site's own
+# identity, which is the whole trick: the hub is the player's parent, not a
+# third-party embedder.
+PROXY_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+# Headers we copy from the player's request straight through to upstream, so a
+# licence POST keeps its content type, its range and its conditional GETs.
+COPY_UP = ("Range", "If-Range", "If-None-Match", "If-Modified-Since", "Content-Type")
+# Headers we copy back from upstream: the player needs the real status and the
+# real body, and a 206 for a ranged media request is not a 200.
+COPY_DOWN = ("Content-Type", "Content-Range", "Accept-Ranges", "Content-Disposition",
+             "ETag", "Last-Modified")
+
+
+def scheme_host(url):
+    """'https://player.example' -- the Origin a browser would have sent."""
+    try:
+        p = urllib.parse.urlparse(url)
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+    except Exception:
+        pass
+    return ""
+
+
+def our_own(url):
+    """True for a URL that points at the hub's own proxy, not at a stream site.
+
+    The referral the browser sends from inside the app window looks like
+    http://127.0.0.1:8790/play?u=... -- forwarding that upstream is exactly what
+    the player hosts reject, so it is replaced before the request leaves.
+    """
+    u = (url or "").strip()
+    if not u:
+        return True
+    if "/play?u=" in u or "/ext?u=" in u or "/watch?u=" in u:
+        return True
+    try:
+        p = urllib.parse.urlparse(u)
+    except Exception:
+        return False
+    if p.hostname not in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "[::1]"):
+        return False
+    return (p.path in ("", "/")) or p.path.startswith("/api/") or p.path == "/index.html"
+
+
+def strip_cookie_flags(raw):
+    """A Set-Cookie the browser will store for 127.0.0.1.
+
+    Domain= and Secure= are dropped: the cookie was issued to the site's host,
+    and the browser is looking at the hub. The name=value and Path stay, which is
+    all a Cloudflare clearance or a session id needs.
+    """
+    parts = [p.strip() for p in (raw or "").split(";") if p.strip()]
+    if not parts:
+        return ""
+    keep = [parts[0]]
+    for p in parts[1:]:
+        low = p.lower()
+        if low.startswith(("domain=", "secure", "samesite=none", "partitioned", "priority=")):
+            continue
+        keep.append(p)
+    return "; ".join(keep)
+
+
 # ------------------------------------------------------------------ server
 class Handler(BaseHTTPRequestHandler):
     server_version = "nbahub/1.0"
@@ -1017,7 +1298,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
         for k, v in (extra or {}).items():
-            self.send_header(k, v)
+            if isinstance(v, (list, tuple)):
+                for one in v:                       # Set-Cookie repeats
+                    self.send_header(k, one)
+            else:
+                self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -1025,11 +1310,37 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    # A Widevine licence request is a POST with an opaque binary body. Without
+    # these three the proxied player could not acquire a key at all: BaseHTTPRequest
+    # answers 501 to any method it has no do_* for, so the licence came back
+    # "unsupported method" and the decoder stayed black while the page looked fine.
+    def do_POST(self):
+        try:
+            return self._route()
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as exc:
+            log_exc("POST " + self.path, exc)
+            try:
+                self._send(502, '{"ok":false,"error":"upstream proxy error"}')
+            except Exception:
+                pass
+
+    def do_PUT(self):
+        return self.do_POST()
+
+    def do_PATCH(self):
+        return self.do_POST()
+
+    def do_DELETE(self):
+        return self.do_POST()
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,OPTIONS")
+        self.send_header("Access-Control-Max-Age", "600")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -1311,14 +1622,17 @@ class Handler(BaseHTTPRequestHandler):
             target = (qs.get("u") or [""])[0]
             if not target:
                 return self._send(400, "missing u", "text/plain")
-            return self._send(200, shell_page(target), "text/html; charset=utf-8")
+            return self._send(200, shell_page(target, target), "text/html; charset=utf-8")
 
         if u.path == "/play":
             target = (qs.get("u") or [""])[0]
             if not target:
                 return self._send(400, "missing u", "text/plain")
+            ref = (qs.get("r") or [""])[0]
+            origin = "http://" + (self.headers.get("Host") or
+                                  "127.0.0.1:%d" % self.server.server_port)
             try:
-                html = proxy_page(target)
+                html = proxy_page(target, ref, origin)
             except Exception as exc:
                 return self._send(502, f"could not load that page: {exc}", "text/plain")
             return self._send(200, html, "text/html; charset=utf-8")
@@ -1327,7 +1641,7 @@ class Handler(BaseHTTPRequestHandler):
             target = (qs.get("u") or [""])[0]
             if not target:
                 return self._send(400, "missing u", "text/plain")
-            return self._passthrough(target)
+            return self._passthrough(target, (qs.get("r") or [""])[0])
 
         if u.path == "/api/watch":
             page = (qs.get("u") or [""])[0]
@@ -1376,28 +1690,128 @@ class Handler(BaseHTTPRequestHandler):
 
         return self._send(404, "not found", "text/plain")
 
-    def _passthrough(self, target):
-        """Fetch an upstream resource for the wrapped page (same-origin for it)."""
-        req = urllib.request.Request(target)
-        req.add_header("User-Agent", UA)
-        req.add_header("Accept", "*/*")
-        req.add_header("Accept-Encoding", "identity")
-        rng = self.headers.get("Range")
-        if rng:
-            req.add_header("Range", rng)
-        ref = self.headers.get("Referer")
-        if ref:
-            req.add_header("Referer", ref)
+    # ------------------------------------------------------------ upstream
+    def _body(self):
+        """The request body, exactly as the browser sent it (binary safe).
+
+        A licence challenge is a few hundred bytes of opaque bytes; a segment
+        upload could be megabytes. Chunked bodies are decoded too, because
+        fetch() sends one whenever the caller passes a stream.
+        """
+        if (self.headers.get("Transfer-Encoding") or "").lower().find("chunked") >= 0:
+            out = bytearray()
+            while True:
+                line = self.rfile.readline(65536).strip()
+                try:
+                    n = int(line.split(b";")[0], 16)
+                except ValueError:
+                    break
+                if n <= 0:
+                    self.rfile.readline(65536)          # trailing CRLF
+                    break
+                out += self.rfile.read(n)
+                self.rfile.read(2)
+            return bytes(out) or None
         try:
-            r = urllib.request.urlopen(req, timeout=25)
-            body = r.read()
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if n <= 0:
+            return None
+        data = self.rfile.read(n)
+        return data or None
+
+    def _passthrough(self, target, referer=None):
+        """One upstream request, method and body included.
+
+        This is the piece that made the app window black while Firefox played:
+        only GET was ever forwarded, so the Widevine licence POST died here with
+        a 501 and the player never got a key. Everything downstream of that --
+        the ranged media requests, the ad-token refreshes, the playlist reloads
+        -- is the same function, so it has to be a real proxy, not a fetcher.
+        """
+        method = (getattr(self, "command", "GET") or "GET").upper()
+        data = self._body() if method in ("POST", "PUT", "PATCH", "DELETE") else None
+        try:
+            req = urllib.request.Request(target, data=data, method=method)
+        except Exception as exc:
+            return self._send(400, f"bad upstream url: {exc}", "text/plain")
+
+        req.add_header("User-Agent", PROXY_UA)
+        req.add_header("Accept", self.headers.get("Accept") or "*/*")
+        req.add_header("Accept-Language", self.headers.get("Accept-Language") or "en-US,en;q=0.9")
+        req.add_header("Accept-Encoding", "identity")
+        for h in COPY_UP:
+            val = self.headers.get(h)
+            if val:
+                req.add_header(h, val)
+
+        # Referer / Origin: never ours. The page that would have made this
+        # request is the upstream one, and that is the string to send.
+        ref = (referer or "").strip()
+        if not ref or our_own(ref):
+            ref = (self.headers.get("Referer") or "").strip()
+        if not ref or our_own(ref):
+            ref = target if method == "GET" else (scheme_host(target) + "/")
+        req.add_header("Referer", ref)
+
+        org = (self.headers.get("Origin") or "").strip()
+        if not org or our_own(org):
+            # A same-origin GET has no Origin at all; inventing one is a good way to
+            # be turned away by a CDN. Only uploads need to name the site.
+            org = scheme_host(target) if method in ("POST", "PUT", "PATCH") else ""
+        if org:
+            req.add_header("Origin", org)
+
+        ck = self.headers.get("Cookie")
+        if ck:
+            req.add_header("Cookie", ck)
+
+        try:
+            r = urllib.request.urlopen(req, timeout=45)
+            status = r.status
+        except urllib.error.HTTPError as exc:      # 4xx/5xx still has a body to relay
+            r = exc
+            status = exc.code
         except Exception as exc:
             return self._send(502, f"upstream: {exc}", "text/plain")
 
-        ctype = r.headers.get("Content-Type", "application/octet-stream")
+        try:
+            body = r.read()
+        except Exception:
+            body = b""
         final = r.geturl()
+        ctype = r.headers.get("Content-Type") or "application/octet-stream"
 
-        if "mpegurl" in ctype.lower() or body[:7] == b"#EXTM3U":
+        extra = {"Cache-Control": "no-store"}
+        for h in COPY_DOWN:
+            if h == "Content-Type":
+                continue
+            val = r.headers.get(h)
+            if val:
+                extra[h] = val
+        cookies = []
+        try:
+            for c in (r.headers.get_all("Set-Cookie") or []):
+                c = strip_cookie_flags(c)
+                if c:
+                    cookies.append(c)
+        except Exception:
+            pass
+        if cookies:
+            extra["Set-Cookie"] = cookies
+        for h in ("Access-Control-Allow-Origin", "Access-Control-Allow-Headers",
+                  "Access-Control-Allow-Methods", "Access-Control-Expose-Headers"):
+            val = r.headers.get(h)
+            if val:
+                extra[h] = val
+        loc = r.headers.get("Location")
+        if loc and status in (301, 302, 303, 307, 308):
+            # keep redirects inside the proxy, or the player silently leaves it
+            extra["Location"] = "/ext?u=" + urllib.parse.quote(
+                urllib.parse.urljoin(final, loc), safe="")
+
+        if ("mpegurl" in ctype.lower() or body[:7] == b"#EXTM3U") and method != "HEAD":
             text = body.decode("utf-8", "replace")
             out = []
             for line in text.splitlines():
@@ -1411,20 +1825,18 @@ class Handler(BaseHTTPRequestHandler):
                         uri, _, tail = rest.partition('"')
                         absu = urllib.parse.urljoin(final, uri)
                         out.append(head + 'URI="/ext?u=' +
-                                   urllib.parse.quote(absu, safe="") + '"' + tail)
+                                   urllib.parse.quote(absu, safe="") +
+                                   '&r=' + urllib.parse.quote(final, safe="") + '"' + tail)
                     else:
                         out.append(s)
                     continue
                 absu = urllib.parse.urljoin(final, s)
-                out.append("/ext?u=" + urllib.parse.quote(absu, safe=""))
+                out.append("/ext?u=" + urllib.parse.quote(absu, safe="") +
+                           "&r=" + urllib.parse.quote(final, safe=""))
             return self._send(200, "\n".join(out) + "\n",
-                              "application/vnd.apple.mpegurl",
-                              {"Cache-Control": "no-store"})
+                              "application/vnd.apple.mpegurl", extra)
 
-        extra = {"Cache-Control": "no-store"}
-        if rng and r.headers.get("Content-Range"):
-            extra["Content-Range"] = r.headers["Content-Range"]
-        return self._send(200, body, ctype, extra)
+        return self._send(status, body, ctype, extra)
 
 
 def main():

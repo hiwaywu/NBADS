@@ -103,8 +103,11 @@ Details worth knowing:
 
 ## What the page does (same in the app window or a browser)
 
-- **Games** â€” click a row marked `live`. The feed is probed first; the player opens in a
-  sandboxed 16:9 shell, ad-free and popup-proof.
+- **Games** - click a row marked `live`. The hub resolves the feed, then serves the
+  site's own player page to the app window through `/play`: sandboxed to 16:9, ad-free,
+  popup-proof (a `window.open` from the player becomes the picture in the same frame),
+  and with its licence POST proxied so Widevine can actually decrypt it. See
+  [Games play in the app window](#games-play-in-the-app-window-21).
 - **NBA TV** â€” always-on channels. These play *inside* the page through the local relay:
   1080p60, ~60 s buffered, 60â€“200 Mbps pull.
 - **latency** â€” the bar shows `14.2s behind live` (straight from hls.js). Measured on this PC:
@@ -135,8 +138,11 @@ window; or open `http://127.0.0.1:8790/` yourself.
 Install `releases/NBAHub.apk` and open it. That is all: no PC, no wifi pairing, works on
 mobile data too.
 
-> Upgrading from 1.x: **uninstall the old app first.** 2.0 is signed with a different key, so
-> Android refuses to install it over the old one (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`).
+> Upgrading: **uninstall the old app first.** 2.0 and 2.1 are built with different signing
+> keys (the 2.1 APK in this repo was built here, with a fresh `android/debug.keystore`), so
+> Android refuses an in-place update (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). The last 2.0
+> build is kept as `releases/NBAHub-2.0-oldkey.apk` if you need to go back -- that one still
+> needs its own key to install, so uninstall between them either way.
 
 What runs inside the APK (`android/src/com/nbahub/app/`):
 
@@ -165,15 +171,34 @@ Better than the 1.x relay, on both counts it used to drop:
 third column sets a Referer for feeds that need one: `NAME | URL | https://referer/`.
 
 **Games play inside the app** on the site's own player page: the app opens the game's
-`Main N` page in its WebView, grants that page Widevine, and refuses its popups. `⌂` (or Back)
-returns to the list; the `Chrome` chip under it reopens the same page in Chrome if a stream
-shows no picture in the WebView. Two things it deliberately does **not** do:
+`Main N` page in its WebView, grants that page Widevine, and keeps the window the
+player asks for (`window.open`) in the app instead of dropping it. A `<iframe id="streamIframe">`
+and a click that hands the picture to another host of the same site are no longer
+mistaken for an ad: only a navigation with no user gesture, to a host this session
+has never talked to, is refused. `⌂` (or Back) returns to the list; the chip under it
+names the browser that is actually installed (Chrome / Firefox / Brave) and reopens
+the same page there when the WebView has no key system at all -- the one case this
+app cannot fix, because a phone without a Widevine CDM has nothing to decrypt with.
 
-- play a game in *our* hls.js player — the feeds are Widevine (`hls-wvpr`, see SOP §2.4), and
-  extracting or decrypting them is not something this project does
-- frame the player inside our page — the player hosts check who embeds them and answer
-  "This stream is not available here" to anyone but their own sites; getting round that would
-  mean faking the embedder, so the app opens their page as-is instead
+### Proving it on a phone, or on an emulator
+
+The app can be put in front of any page from adb, which is how the in-app playback path is
+tested without waiting for a game:
+
+```powershell
+adb shell am start -n com.nbahub.app/.MainActivity --es url https://host/main/1
+python tools/verify_android_inapp.py      # 10 checks, needs a booted device/emulator
+```
+
+`verify_android_inapp.py` starts `tools/fixture_stream.py` on `0.0.0.0` (an emulator reaches
+the host as `10.0.2.2`), installs the APK, and drives the fixture's player page -- the one
+that puts its media in a `window.open()` window. It then reads the evidence from `logcat`
+(`popup kept in-app: ...`, `page finished: .../popup`) and from the page itself, which beacons
+its own `<video>` state back to the fixture (`readyState 4`, 1920x1080, currentTime advancing,
+UA `NBAHubApp/2.1`) -- a WebView on a phone cannot be inspected from a PC otherwise. Last
+measured on a Pixel 7 / Android 15 emulator: **10/10**, screenshot in
+`docs/android_inapp_popup.png`. It also proves the ad gate still holds: a script-driven jump
+to an unknown host is refused (`nav blocked (no gesture, unknown host)`), while a tap is not.
 
 On the phone, a game opens its first `Main N` page whose HTML names a player frame, without
 probing it — there is no headless browser to probe with.
@@ -196,6 +221,44 @@ adb install --no-incremental android\NBAHub.apk
 
 Deep link straight into a channel: `adb shell am start -n com.nbahub.app/.MainActivity --es chan 1`.
 
+
+## Games play in the app window (2.1)
+
+The old behaviour -- a game opened its stream in its own player window, and when that window
+stayed black you pressed the browser button -- came from four gates. Every one of them was
+ours, not the site's:
+
+| Gate | What actually happened | What the hub does now |
+|---|---|---|
+| `POST /ext` | `BaseHTTPRequestHandler` answers **501** to any method it has no `do_*` for, so the Widevine licence challenge died at the hub and the decoder never got a key. The page loaded, the poster showed, the picture did not. | `do_POST` / `do_PUT` / `do_PATCH` / `do_DELETE`, binary body (chunked too), the real upstream status, `Content-Range`, `Accept-Ranges`, and `Set-Cookie` rewritten for the hub host |
+| upstream identity | every proxied request left as `127.0.0.1` with no `Origin` -- exactly the string player hosts refuse | `Referer` and `Origin` are rewritten to the site's own page, never to the hub; `document.referrer` inside the page answers with it as well |
+| nested player frame | the player's own `<iframe>` loaded straight from the site, so its `X-Frame-Options` and embedder check applied in full | every `<iframe>` / `<frame>` / `srcdoc` is rehosted through `/play` (absolute URLs, because the page's own `<base>` would otherwise resolve a relative one against the *site*) |
+| `window.open()` | `#pf` is sandboxed, so the popup is refused; on the phone the popup was dropped outright and the screen stayed black | the frame's `window.open` posts the URL to the page, which loads it in the same frame -- no second window; on Android `onCreateWindow` hands the popup's first URL to the main WebView |
+
+Two smaller things ride along: the picture is no longer clicked 20 times by the autostart
+script (on these players a click on the video is a pause toggle, which is how an "autostart"
+used to end up on a black frame), and `#pf` now watches its own frame -- if a page navigates
+itself to an ad wall, the last proxy URL is put back (three times, then it gives up rather
+than loop).
+
+### Proving it without a live game
+
+```text
+python tools/fixture_stream.py       # a mirror that refuses foreign referers, sets
+                                     # X-Frame-Options, posts a binary licence, frames a
+                                     # nested player, runs a frame-buster, calls window.open
+python tools/verify_inapp_game.py    # 17 checks against the real --app window (CDP)
+```
+
+`verify_inapp_game.py` starts the hub, starts the fixture, launches Chrome with the
+launcher's own command line and asserts, in the order the old code failed: the fixture
+refuses a foreign referer (403 "This stream is not available here") and serves its own; the
+app window has `com.widevine.alpha`; `POST /ext` reaches upstream as a POST with its 8-byte
+body and the site's `Origin`/`Referer`; the nested player frame is served by `/play` and
+plays (1920x1080, `readyState 4`, currentTime advancing); the frame-buster's top-navigation
+is refused by the sandbox; `document.referrer` is the site; `window.open()` becomes the
+picture in the same frame with **no second window**; and the app window's own URL never
+changes. Last measured: **17/17**.
 
 ## Screenshots
 
@@ -228,9 +291,14 @@ that cost the most time:
 
 ## Limits, stated plainly
 
-- **Game streams are Widevine/PlayReady DRM.** No third-party player can decode them, and an
-  Android WebView cannot either (no EME on an insecure origin). Desktop: an embedded Chrome
-  frame. Phone: the browser. Channels are open HLS and run in our own player.
+- **Game streams are Widevine/PlayReady DRM**, and the decryption is the browser's own
+  CDM: the hub never touches a key. What it does is make the site's page willing to run
+  for it -- the licence POST through `/ext`, the site's own `Referer`/`Origin` on the
+  way out, and every nested player frame served by `/play` so `X-Frame-Options` and the
+  embedder check never see a foreign parent. On the PC that puts the picture *inside*
+  the app window. On a phone it needs a WebView with a Widevine key system; when there
+  is none, diagnostics say so and the browser chip is the fallback. Channels are open
+  HLS and run in our own player.
 - The aggregator HTML is the fragile dependency: if their `ItemList` block changes shape, the
   game list empties â€” visibly, which is the failure mode worth having.
 - A pre-game page shows a countdown, not a picture. `has a feed (opens at tip-off)` in the

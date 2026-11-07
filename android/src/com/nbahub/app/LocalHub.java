@@ -51,7 +51,7 @@ import java.util.regex.Pattern;
 final class LocalHub {
 
     private static final String TAG = "nbahub.hub";
-    static final String VERSION = "2.0";
+    static final String VERSION = "2.1";
     private static final String FEEDS_REMOTE =
             "https://raw.githubusercontent.com/hiwaywu/NBADS/main/nba/feeds.txt";
 
