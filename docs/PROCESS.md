@@ -576,3 +576,49 @@ Emulator recipe (no device needed):
 $sdk\emulator\emulator.exe -avd NovelAI_Pixel -no-snapshot -no-audio -gpu swiftshader_indirect
 python tools/verify_android_inapp.py            # 10/10, screenshot written to docs/
 ```
+
+---
+
+## 2.5 -- the regression 2.1 shipped: "just all ads"
+
+2.1 got the picture onto the screen and 2.4 lost it again, in a way worth writing down because
+the mistake is a general one: **we opened a hole exactly the width of the thing we were trying
+to beat.**
+
+The popup bridge was the fix for "the player opens its media window with `window.open()` and a
+sandboxed frame cannot". It honoured *every* popup. On a real game page an ad calls
+`window.open()` far more often than the player does, so the player frame -- and on the phone the
+whole WebView -- was replaced by ad landing pages within seconds. The picture was gone, the app
+looked "worse than before", and the browser chip was hidden because the page it was on never
+finished loading (`updateChip()` only ran in `onPageFinished`).
+
+The same class of bug on the phone's navigation guard: 2.4 allowed any navigation with
+`request.hasGesture()`. The overlay an ad paints over the video is a full-screen `<a>` that looks
+like a play button, so *the user's own tap* was the thing that took the app off the player.
+
+What the gate is now, in both shells and in one sentence: **a popup or a navigation is allowed
+only if it belongs to what is already playing** -- same host, same site, a host this session has
+already loaded (the iframe's own host lands in `knownHosts`/`pfKnownHosts` through the resource
+layer), or a URL whose path names a player (`/main/`, `/embed`, `/player`, `/live`, `/secure/`,
+`.m3u8`, `.mpd`). A gesture changes nothing; ads are designed to be tapped.
+
+Traps added to the list:
+
+- **`window.open` is an ad API first and a player API second.** Any "honour the popup" change
+  needs the gate in the same commit, or the build becomes an ad wrapper. Test it with a page
+  that opens an ad window (`fixture_stream.py:/adwin`) *in the same run* as the page that opens
+  a player window (`/main/2`), and assert the picture survived both.
+- **`hasGesture()` identifies the finger, not the intent.** It is useless as an
+  "allow this navigation" switch on a page whose whole surface is covered by ad anchors.
+- **A chip that appears in `onPageFinished` is missing exactly when it is needed.** Move it to
+  `onPageStarted`, and treat "no URL yet" as "away from home", not as "at home".
+- **A click can be the pause toggle; a tap can be the ad.** Both were fixed by removing
+  "click/tap everything" heuristics: scripted clicks only on play-shaped elements, and no
+  gesture-based allow-list at all.
+
+Measured after the gate (the fixture now serves `/adwin` and `/tapad` as well):
+
+```text
+python tools/verify_inapp_game.py      20/20   (PC, real --app window over CDP)
+python tools/verify_android_inapp.py   14/14   (Pixel 7 / Android 15 emulator, release APK)
+```

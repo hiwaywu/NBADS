@@ -107,7 +107,7 @@ Details worth knowing:
   site's own player page to the app window through `/play`: sandboxed to 16:9, ad-free,
   popup-proof (a `window.open` from the player becomes the picture in the same frame),
   and with its licence POST proxied so Widevine can actually decrypt it. See
-  [Games play in the app window](#games-play-in-the-app-window-21).
+  [Games play in the app window](#games-play-in-the-app-window-25).
 - **NBA TV** â€” always-on channels. These play *inside* the page through the local relay:
   1080p60, ~60 s buffered, 60â€“200 Mbps pull.
 - **latency** â€” the bar shows `14.2s behind live` (straight from hls.js). Measured on this PC:
@@ -138,9 +138,11 @@ window; or open `http://127.0.0.1:8790/` yourself.
 Install `releases/NBAHub.apk` and open it. That is all: no PC, no wifi pairing, works on
 mobile data too.
 
-> Upgrading: **uninstall the old app first.** 2.0 and 2.1 are built with different signing
-> keys (the 2.1 APK in this repo was built here, with a fresh `android/debug.keystore`), so
-> Android refuses an in-place update (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). The last 2.0
+> Upgrading: **uninstall the old app first.** 2.0, 2.1 and 2.5 are built with different
+> signing keys (the 2.5 APK in this repo was built here, with a fresh `android/debug.keystore`),
+> so Android refuses an in-place update (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Keep the old
+> build around if you need to go back -- that one needs its own key to install, so uninstall
+> between them either way. The last 2.0
 > build is kept as `releases/NBAHub-2.0-oldkey.apk` if you need to go back -- that one still
 > needs its own key to install, so uninstall between them either way.
 
@@ -174,9 +176,13 @@ third column sets a Referer for feeds that need one: `NAME | URL | https://refer
 `Main N` page in its WebView, grants that page Widevine, and keeps the window the
 player asks for (`window.open`) in the app instead of dropping it. A `<iframe id="streamIframe">`
 and a click that hands the picture to another host of the same site are no longer
-mistaken for an ad: only a navigation with no user gesture, to a host this session
-has never talked to, is refused. `⌂` (or Back) returns to the list; the chip under it
-names the browser that is actually installed (Chrome / Firefox / Brave) and reopens
+mistaken for an ad, and neither is a `window.open()`: a navigation or a popup is accepted
+only when it is the same host, the same site, a host this session already loaded, or a URL
+that names a player (`/main/`, `/embed`, `/player`, `/live`, `/secure/`, `.m3u8`) -- a tap
+is not a licence to leave the app, because the overlay an ad paints over the picture is a
+full-screen link that looks like a play button. `⌂` (or Back) returns to the list; the
+chip under it is on every page that is not the hub, appears as soon as a page starts
+loading, names the browser that is actually installed (Chrome / Firefox / Brave) and reopens
 the same page there when the WebView has no key system at all -- the one case this
 app cannot fix, because a phone without a Widevine CDM has nothing to decrypt with.
 
@@ -187,7 +193,7 @@ tested without waiting for a game:
 
 ```powershell
 adb shell am start -n com.nbahub.app/.MainActivity --es url https://host/main/1
-python tools/verify_android_inapp.py      # 10 checks, needs a booted device/emulator
+python tools/verify_android_inapp.py      # 14 checks, needs a booted device/emulator
 ```
 
 `verify_android_inapp.py` starts `tools/fixture_stream.py` on `0.0.0.0` (an emulator reaches
@@ -196,9 +202,11 @@ that puts its media in a `window.open()` window. It then reads the evidence from
 (`popup kept in-app: ...`, `page finished: .../popup`) and from the page itself, which beacons
 its own `<video>` state back to the fixture (`readyState 4`, 1920x1080, currentTime advancing,
 UA `NBAHubApp/2.1`) -- a WebView on a phone cannot be inspected from a PC otherwise. Last
-measured on a Pixel 7 / Android 15 emulator: **10/10**, screenshot in
-`docs/android_inapp_popup.png`. It also proves the ad gate still holds: a script-driven jump
-to an unknown host is refused (`nav blocked (no gesture, unknown host)`), while a tap is not.
+measured on a Pixel 7 / Android 15 emulator: **14/14**, screenshot in
+`docs/android_inapp_popup.png`. It also proves the ad gate holds, on the exact shapes that
+broke 2.4: an ad's `window.open()` is dropped (`popup dropped (not the player)`), the app stays
+on the player while the video keeps decoding, a tap on an ad overlay is refused
+(`nav blocked (not the player)`), and a script-driven jump to an unknown host is refused too.
 
 On the phone, a game opens its first `Main N` page whose HTML names a player frame, without
 probing it — there is no headless browser to probe with.
@@ -222,7 +230,7 @@ adb install --no-incremental android\NBAHub.apk
 Deep link straight into a channel: `adb shell am start -n com.nbahub.app/.MainActivity --es chan 1`.
 
 
-## Games play in the app window (2.1)
+## Games play in the app window (2.5)
 
 The old behaviour -- a game opened its stream in its own player window, and when that window
 stayed black you pressed the browser button -- came from four gates. Every one of them was
@@ -234,6 +242,8 @@ ours, not the site's:
 | upstream identity | every proxied request left as `127.0.0.1` with no `Origin` -- exactly the string player hosts refuse | `Referer` and `Origin` are rewritten to the site's own page, never to the hub; `document.referrer` inside the page answers with it as well |
 | nested player frame | the player's own `<iframe>` loaded straight from the site, so its `X-Frame-Options` and embedder check applied in full | every `<iframe>` / `<frame>` / `srcdoc` is rehosted through `/play` (absolute URLs, because the page's own `<base>` would otherwise resolve a relative one against the *site*) |
 | `window.open()` | `#pf` is sandboxed, so the popup is refused; on the phone the popup was dropped outright and the screen stayed black | the frame's `window.open` posts the URL to the page, which loads it in the same frame -- no second window; on Android `onCreateWindow` hands the popup's first URL to the main WebView |
+| which popup | 2.4 honoured **every** `window.open()`: an ad calls it far more often than a player does, so the player frame / main WebView became an ad landing page and the video disappeared | a popup is only taken when it names a player -- same site, a host this session already loaded, or a path with `/main/`, `/embed`, `/player`, `/live`, `/secure/`, `.m3u8`, `.mpd`. Everything else is dropped and logged |
+| a tap | 2.4 let any tapped navigation through, and the overlay an ad paints over the picture is a full-screen link | same host / same site / known host / player-shaped URL, or refused -- `nav blocked (not the player)` |
 
 Two smaller things ride along: the picture is no longer clicked 20 times by the autostart
 script (on these players a click on the video is a pause toggle, which is how an "autostart"
@@ -247,7 +257,8 @@ than loop).
 python tools/fixture_stream.py       # a mirror that refuses foreign referers, sets
                                      # X-Frame-Options, posts a binary licence, frames a
                                      # nested player, runs a frame-buster, calls window.open
-python tools/verify_inapp_game.py    # 17 checks against the real --app window (CDP)
+python tools/verify_inapp_game.py    # 20 checks against the real --app window (CDP)
+python tools/build_portable.py --zip # releases/NBAHub-portable.zip (own Python 3.13)
 ```
 
 `verify_inapp_game.py` starts the hub, starts the fixture, launches Chrome with the
@@ -258,7 +269,9 @@ body and the site's `Origin`/`Referer`; the nested player frame is served by `/p
 plays (1920x1080, `readyState 4`, currentTime advancing); the frame-buster's top-navigation
 is refused by the sandbox; `document.referrer` is the site; `window.open()` becomes the
 picture in the same frame with **no second window**; and the app window's own URL never
-changes. Last measured: **17/17**.
+changes. Last measured: **20/20** on the PC, and **14/14** on the phone (Pixel 7 / Android 15
+emulator, the APK from the release) with the ad shapes included -- an ad's `window.open()`
+dropped, the picture still running, a tap on an ad overlay refused.
 
 ## Screenshots
 
