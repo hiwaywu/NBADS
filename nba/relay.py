@@ -41,6 +41,11 @@ from urllib3.util.retry import Retry
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
+# A harvested feed is not a plain HLS URL: the CDN it sits on answers only when the
+# request says which page it came from (the player page the chain walked through).
+# One relay serves one feed, so one global Referer is exactly right.
+REFERER = None
+
 # --------------------------------------------------------------------------- #
 # HTTP with connection reuse + generous pooling (this is the "more bandwidth"
 # part: N parallel keep-alive sockets instead of one serial download stream)
@@ -59,7 +64,20 @@ def make_session(pool=24):
         "Accept-Language": "en-US,en;q=0.9",
         "Connection": "keep-alive",
     })
+    if REFERER:
+        s.headers.update({"Referer": REFERER, "Origin": _origin(REFERER)})
     return s
+
+
+def _origin(url):
+    """https://cdn.example -- what a Referer implies for the Origin header."""
+    try:
+        p = urllib.parse.urlparse(url)
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+    except Exception:
+        pass
+    return ""
 
 
 def fetch_text(sess, url, timeout=12):
@@ -560,7 +578,11 @@ def main():
                     help="how many minutes of the stream to keep on disk")
     ap.add_argument("--dvr-max-mb", type=int, default=1200,
                     help="hard byte cap for the DVR folder")
+    ap.add_argument("--referer", default=None,
+                    help="Referer the feed's CDN expects (a harvested feed needs one)")
     args = ap.parse_args()
+    global REFERER
+    REFERER = args.referer
 
     relay = Relay(args.url, window=args.window, prefetch=args.prefetch,
                   max_seconds=args.max_seconds, idle_timeout=args.idle_timeout,

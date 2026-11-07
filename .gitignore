@@ -33,3 +33,6 @@ android/NBAHub.apk
 # portable bundle build output
 build-portable/
 releases/*-oldkey.apk
+
+# relay download-ahead folders
+nba/dvr/

@@ -1309,24 +1309,28 @@ async function watchGame(g, useFrame){
   $('#pillQ').style.display = 'none';
   $('#pillBuf').style.display = 'none';
 
-  // PC hub only: drive the mirror chain in a real browser, take the media playlist
-  // its own player asks for, and play THAT here through the relay. The standalone
-  // Android build has no /api/harvest (no Playwright inside the APK), so a 404 just
-  // falls through to the paths below.
+  // Same walk as the phone, now on the PC too: try the plain-GET chain first -- no
+  // page JS, so no ad layer loads -- and play the manifest it names in our own
+  // <video> through the relay. A feed that is Widevine-packaged but ships its clear
+  // key in the open plays as well; only a real Widevine feed (no published key)
+  // falls through to the site's player page.
   if (!STANDALONE && !IS_MOBILE){
     try {
       const hr = await fetch('/api/harvest?u=' + encodeURIComponent(g.url));
       if (hr.ok){
         const h = await hr.json();
-        if (h && h.ok && h.m3u8 && !h.drm){
+        const keys = (h && h.keys && Object.keys(h.keys).length) ? h.keys : null;
+        if (h && h.ok && h.m3u8 && (!h.drm || keys)){
           if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
           lastChannel = null;
           document.body.classList.remove('iframeMode');
-          toast('got the media playlist - playing it here', 2600);
-          await playChannel({ name: g.name, url: h.m3u8 });
+          toast(keys ? 'harvested the feed and its published key - playing here'
+                     : 'harvested the feed - playing it here, no player page, no ads', 3000);
+          await playChannel({ name: g.name, url: h.m3u8, referer: h.referer }, false, keys);
           return;
         }
-        if (h && h.drm) toast('this mirror is Widevine - using the player page', 3000);
+        if (h && h.drm && !keys)
+          toast('this mirror is Widevine with no published key - using the player page', 3200);
       }
     } catch(e){}
   }

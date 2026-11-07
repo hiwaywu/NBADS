@@ -260,7 +260,7 @@ than loop).
 python tools/fixture_stream.py       # a mirror that refuses foreign referers, sets
                                      # X-Frame-Options, posts a binary licence, frames a
                                      # nested player, runs a frame-buster, calls window.open
-python tools/verify_inapp_game.py    # 20 checks against the real --app window (CDP)
+python tools/verify_inapp_game.py    # 26 checks against the real --app window (CDP)
 python tools/build_portable.py --zip # releases/NBAHub-portable.zip (own Python 3.13)
 ```
 
@@ -272,7 +272,7 @@ body and the site's `Origin`/`Referer`; the nested player frame is served by `/p
 plays (1920x1080, `readyState 4`, currentTime advancing); the frame-buster's top-navigation
 is refused by the sandbox; `document.referrer` is the site; `window.open()` becomes the
 picture in the same frame with **no second window**; and the app window's own URL never
-changes. Last measured: **20/20** on the PC, and **14/14** on the phone (Pixel 7 / Android 15
+changes. Last measured: **26/26** on the PC, and **14/14** on the phone (Pixel 7 / Android 15
 emulator, the APK from the release) with the ad shapes included -- an ad's `window.open()`
 dropped, the picture still running, a tap on an ad overlay refused.
 
@@ -294,6 +294,19 @@ Two details decide whether the picture actually appears:
 |---|---|
 | `&sessionId=<guid>` on the League Pass manifest | the Akamai edge answers **400** to the URL it just handed out; it reads as a dead stream |
 | the leaked `masterinf = {"<kid>":"<key>"}` pair | the feed is CENC; hls.js asks **Widevine** for a license that does not exist (`keySystemNoKeys`), so the app bundles **shaka-player** and plays it with `drm.clearKeys`, exactly like the provider's own page |
+
+**The PC walks the same chain.** The Java walker in the app was ported to `hub.py` as
+`harvest_http()`: plain `GET`s, iframe/rotator hops, `globalurl` / `DIRECT_STREAM_URL` /
+hard-coded `.m3u8` / `.mpd`, `&sessionId=` added when the family needs it, and the
+`masterinf` pair kept for `/api/clearkey`. `harvest.py` (Playwright) is now only the fallback
+for a player that builds its URL on a click, so the portable bundle needs no browser at all.
+The relay learned `--referer` for the same reason (`/api/play?u=...&r=<player page>`): a
+harvested feed's CDN answers its own page and 403s anything else. `tools/fixture_stream.py`
+grew a `/chain -> /main/7 -> /wrap2 -> /live.m3u8` fixture whose CDN refuses a request with no
+referer, plus a leaked `masterinf` pair; the four checks that cover it are
+`harvest: the chain walk finds the manifest...`, `...published clear-key pair...`,
+`clearkey: the JWK set hls.js asks for...` and `relay: it pulls the harvested feed with that
+referer`.
 
 Sound is two separate things: the element is no longer muted by our own play path (a `sound on` /
 `muted` button sits in the bar, and tapping the picture unmutes), and -- the part that was really

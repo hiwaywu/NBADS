@@ -27,6 +27,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -623,6 +624,186 @@ FINDER = os.path.join(ROOT, "find_stream.py")
 GAME_CACHE = {}
 GAME_TTL = 900
 
+# ---------------------------------------------------------------- chain walk
+# The Android app resolves a game to its manifest with plain HTTPS GETs and no
+# browser at all; this is the same walk, on the PC. The "Main N" link is a wrapper
+# chain: a page that embeds an iframe, an iframe that builds another one in JS, and
+# finally a page that names the manifest (a globalurl constant, DIRECT_STREAM_URL, a
+# rotator entry, or a hard-coded .m3u8/.mpd). Some providers also leave the CDM's
+# clear-key pair in the open next to it (masterinf = {"kid": "key"}).
+#
+# Why bother when Playwright works: no page JS runs, so none of the ad layers ever
+# load, and there is no browser to launch (the portable bundle has no Playwright).
+HARVEST_KEYS = {}          # last harvested clear-key pair: kid hex -> key hex
+
+P_GLOBALURL = re.compile(r"globalurl\s*=\s*['\"]([^'\"\r\n]+)['\"]", re.I)
+P_DIRECTURL = re.compile(r"DIRECT_STREAM_URL\s*=\s*['\"]([^'\"\r\n]+)['\"]", re.I)
+P_VALUE = re.compile(r'"value"\s*:\s*"([^"]+)"', re.I)
+P_MANIFEST = re.compile(r"(https?://[^\"'\\\s<>]+?\.(?:m3u8|mpd)[^\"'\\\s<>]*)", re.I)
+P_IFRAME = re.compile(r"<iframe[^>]*?\bsrc\s*=\s*['\"]([^'\"]+)['\"]", re.I)
+P_JS_SRC = re.compile(r"\.src\s*=\s*['\"](https?://[^'\"\r\n]+)['\"]")
+P_MASTERINF = re.compile(r"masterinf\s*=\s*\{([^}]{10,600})\}", re.I)
+P_KEYKV = re.compile(r'"?([0-9a-fA-F]{16,64})"?\s*:\s*"?([0-9a-fA-F]{16,64})"?')
+
+ADISH = ("doubleclick", "googlesyndication", "adservice", "popads", "adcash",
+         "propellerads", "histats.com", "onclick", "hilltopads", "exoclick")
+
+
+def _adish(u):
+    low = (u or "").lower()
+    return any(a in low for a in ADISH)
+
+
+def _host(u):
+    try:
+        return urllib.parse.urlparse(u).hostname or ""
+    except Exception:
+        return ""
+
+
+def _keys_in(text):
+    m = P_MASTERINF.search(text or "")
+    if not m:
+        return None
+    out = {}
+    for kid, key in P_KEYKV.findall(m.group(1)):
+        out[kid.lower()] = key.lower()
+    return out or None
+
+
+def _manifest_in(text):
+    """The manifest a wrapper page names, in the order the players try them."""
+    for pat in (P_GLOBALURL, P_DIRECTURL):
+        m = pat.search(text or "")
+        if m:
+            return m.group(1)
+    m = P_MANIFEST.search(text or "")
+    return m.group(1) if m else None
+
+
+def _next_hop(text):
+    """The next player URL a wrapper hands the picture to."""
+    m = P_IFRAME.search(text or "")
+    if m:
+        u = m.group(1)
+    else:
+        m = P_VALUE.search(text or "")
+        u = m.group(1) if m else None
+    if u is None:
+        for m in P_JS_SRC.finditer(text or ""):
+            cand = m.group(1)
+            ctx = (text[max(0, m.start(1) - 260):m.start(1) + 260]).lower()
+            if "iframe" in ctx and not _adish(cand):
+                u = cand
+                break
+    if not u or _adish(u):
+        return None
+    return u                      # relative values are joined by the caller
+
+
+def _session_id(url):
+    """The provider's own player appends &sessionId=<guid>; the Akamai edge 400s without it."""
+    if "sessionid=" in url.lower():
+        return url
+    sep = "&" if "?" in url else "?"
+    return url + sep + "sessionId=" + str(uuid.uuid4())
+
+
+def b64url_hex(hexstr):
+    """A hex key as unpadded base64url -- the only shape a JWK accepts."""
+    import base64
+    raw = bytes.fromhex(hexstr)
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def harvest_http(page):
+    """Walk the chain with plain GETs. Returns the /api/harvest payload."""
+    if not page:
+        return {"ok": False, "error": "missing u"}
+    links = feed_links(page) or [page]
+    tried, traces = [], []
+    for main in links[:4]:
+        tried.append(main)
+        hit = _follow_chain(main, page)
+        if hit and hit.get("ok"):
+            hit["page"] = page
+            hit["tried"] = tried
+            hit["http"] = True
+            return hit
+        if hit:
+            traces.append(hit)
+    return {"ok": False, "tried": tried, "chains": traces, "http": True}
+
+
+def _follow_chain(first, event_page):
+    referer = event_page or first
+    seen, keys, trace = set(), None, []
+    cur = first
+    reason = "ran out of hops"
+    for hop in range(6):
+        if not cur:
+            break
+        if cur in seen:
+            reason = "loop at hop %d" % hop
+            break
+        seen.add(cur)
+        try:
+            r = fetch(cur, timeout=20, headers={"Referer": referer})
+            raw = r.read().decode("utf-8", "replace")
+            final = r.geturl() or cur
+        except Exception as exc:
+            reason = "hop %d (%s) failed: %s" % (hop, _host(cur), exc)
+            trace.append(reason)
+            return {"ok": False, "error": reason, "trace": trace}
+        keys = _keys_in(raw) or keys
+        found = _manifest_in(raw)
+        if found:
+            found = urllib.parse.urljoin(final, found)
+            found = _session_id(found)
+            if keys:
+                HARVEST_KEYS.clear()
+                HARVEST_KEYS.update(keys)
+            return {"ok": True, "m3u8": found, "via": _host(found),
+                    "hops": len(seen), "referer": final,
+                    "keys": dict(keys or {})}
+        trace.append("hop %d: %s (%d bytes), no stream named" % (hop, _host(cur), len(raw)))
+        nxt = _next_hop(raw)
+        if not nxt:
+            reason = "hop %d (%s) names no iframe and no stream" % (hop, _host(cur))
+            break
+        cur = nxt if nxt.startswith("http") else urllib.parse.urljoin(final, nxt)
+    return {"ok": False, "error": reason, "trace": trace}
+
+
+def harvest_payload(page, fresh=False):
+    """The best answer for /api/harvest: the GET walk first, Playwright second."""
+    hit = HARVEST_CACHE.get(page)
+    if hit and not fresh and time.time() - hit[0] < HARVEST_TTL:
+        return hit[1]
+    payload = None
+    try:
+        payload = harvest_http(page)
+    except Exception as exc:
+        payload = {"ok": False, "error": str(exc)[:200], "http": True}
+    if not payload.get("ok") and os.path.isfile(HARVEST):
+        # the browser is still worth trying: it can see a modal, a cookie wall, a
+        # player that only builds its URL on a click
+        try:
+            proc = subprocess.run([find_python(), HARVEST, page], cwd=ROOT,
+                                  capture_output=True, text=True, timeout=120)
+            pw = json.loads((proc.stdout or "{}").strip() or "{}")
+            if pw.get("ok"):
+                pw["keys"] = dict(HARVEST_KEYS)
+                pw["http"] = False
+                payload = pw
+            else:
+                payload.setdefault("playwright", pw.get("error") or pw.get("reason") or "no feed")
+        except Exception as exc:
+            payload.setdefault("playwright", str(exc)[:160])
+    HARVEST_CACHE[page] = (time.time(), payload)
+    return payload
+
+
 
 def feed_links(page):
     """All 'Main N' player links on an event page, in order."""
@@ -1128,8 +1309,8 @@ def _stop_everything():
     os._exit(0)
 
 
-def start_relay(url, low=False):
-    key = url + ("#low" if low else "")
+def start_relay(url, low=False, referer=None):
+    key = url + ("#low" if low else "") + (("#" + referer) if referer else "")
     with RELAY_LOCK:
         item = RELAYS.get(key)
         if item:
@@ -1160,6 +1341,8 @@ def start_relay(url, low=False):
            "--host", RELAY_HOST,
            "--window", window, "--prefetch", prefetch, "--idle-timeout", "900",
            "--dvr", dvr_dir, "--dvr-minutes", dvr_min]
+    if referer:
+        cmd += ["--referer", referer]
     creation = 0x08000000  # CREATE_NO_WINDOW
     proc = subprocess.Popen(cmd, cwd=NBA_DIR, creationflags=creation,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1373,6 +1556,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html", "text/html; charset=utf-8")
         if u.path == "/hls.min.js":
             return self._static("hls.min.js", "application/javascript")
+        if u.path == "/shaka.js":
+            # the page loads it with defer: a 404 only disables the Shaka path, which
+            # is why it has to be served here and not only in the APK's assets
+            return self._static("shaka.js", "application/javascript")
 
         if u.path == "/api/ping":
             # the app scans the LAN for this: it is the only way to find the PC
@@ -1461,27 +1648,42 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"date": None, "error": str(exc)}))
 
         if u.path == "/api/harvest":
-            # drive a real browser down the mirror chain and come back with the
-            # media playlist the embedded player asked for. That URL is plain HLS,
-            # so our own relay and our own <video> can play it: no iframe, no ads,
-            # no browser hand-off.
+            # The GET walk first: no browser, no page JS, no ad layer. Playwright is
+            # kept as the fallback for a player that only builds its URL on a click.
             page = (qs.get("u") or [""])[0]
             if not page:
                 return self._send(400, '{"ok":false,"error":"missing u"}')
             fresh = (qs.get("fresh") or ["0"])[0] == "1"
-            hit = HARVEST_CACHE.get(page)
-            if hit and not fresh and time.time() - hit[0] < HARVEST_TTL:
-                return self._send(200, json.dumps(hit[1]))
+            return self._send(200, json.dumps(harvest_payload(page, fresh)))
+
+        if u.path == "/api/clearkey":
+            # What hls.js asks when a harvested feed is SAMPLE-AES with a key the
+            # provider published next to the manifest. A JWK set, no license server.
+            arr = []
+            for kid, key in list(HARVEST_KEYS.items()):
+                try:
+                    arr.append({"kty": "oct", "kid": b64url_hex(kid), "k": b64url_hex(key)})
+                except Exception:
+                    pass
+            return self._send(200, json.dumps({"keys": arr}))
+
+        if u.path == "/api/keys" and self.command == "POST":
+            # parity with the phone: the page may hand back a pair it found itself
             try:
-                proc = subprocess.run([find_python(), HARVEST, page],
-                                      cwd=ROOT, capture_output=True, text=True, timeout=120)
-                payload = json.loads(proc.stdout.strip() or "{}")
-                if not payload:
-                    payload = {"ok": False, "error": (proc.stderr or "harvest failed")[-300:]}
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n).decode("utf-8", "replace") or "{}")
+                ks = body.get("keys") or {}
+                if isinstance(ks, dict):
+                    HARVEST_KEYS.clear()
+                    HARVEST_KEYS.update({str(k).lower(): str(v).lower() for k, v in ks.items()})
+                return self._send(200, json.dumps({"ok": True, "keys": len(HARVEST_KEYS)}))
             except Exception as exc:
-                payload = {"ok": False, "error": str(exc)[:200]}
-            HARVEST_CACHE[page] = (time.time(), payload)
-            return self._send(200, json.dumps(payload))
+                return self._send(200, json.dumps({"ok": False, "error": str(exc)[:160]}))
+
+        if u.path == "/api/harvest_settle":
+            # private: what the last harvest left behind, for the diagnostics panel
+            return self._send(200, json.dumps({"keys": len(HARVEST_KEYS),
+                                               "cache": len(HARVEST_CACHE)}))
 
         if u.path == "/api/lp":
             # League Pass ladder for one game: what renditions exist and what
@@ -1546,9 +1748,12 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/play":
             target = (qs.get("u") or [""])[0]
             low = (qs.get("low") or ["0"])[0] == "1"
+            # r=<player page>: a harvested feed is not in feeds.txt, so the Referer
+            # its CDN expects cannot come from the list; it comes per request.
+            ref = (qs.get("r") or [""])[0]
             if not target:
                 return self._send(400, '{"ok":false,"error":"missing u"}')
-            port = start_relay(target, low=low)
+            port = start_relay(target, low=low, referer=ref or None)
             if not port:
                 return self._send(200, json.dumps({"ok": False, "error": "relay failed"}))
             info = {}

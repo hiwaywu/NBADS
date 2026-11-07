@@ -18,6 +18,7 @@ Checks, in the order the old code failed them:
                    frame, with no second window
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -283,7 +284,10 @@ def main():
             play3 = "/play?u=" + urllib.parse.quote(ADWIN, safe="") + \
                     "&r=" + urllib.parse.quote(EVENT, safe="")
             show(play3)
-            page.wait_for_timeout(7000)
+            st3 = wait(lambda: (lambda s: s if (s and "/play?u=" in (s.get("url") or "")
+                                                and moving(s)) else None)(
+                frame_state("/embed/player")), 20)
+            page.wait_for_timeout(1500)
             src3 = page.evaluate("() => (document.querySelector('#pf') || {}).getAttribute('src') || ''")
             st3 = frame_state("/embed/player")
             check("ad: an ad's window.open() did not replace the player",
@@ -294,6 +298,44 @@ def main():
             check("ad: no window was opened for the ad",
                   len(ctx.pages) == before_pages,
                   "%d page target(s)" % len(ctx.pages))
+
+            # ---- the harvest walk: how the phone resolves a game, now on the PC ----
+            CHAIN = ORIGIN + "/chain"
+            try:
+                hj = json.loads(http(HUB + "/api/harvest?u=" +
+                                     urllib.parse.quote(CHAIN, safe=""))[1] or "{}")
+            except Exception:
+                hj = {}
+            check("harvest: the chain walk finds the manifest with no browser and no page JS",
+                  bool(hj.get("ok")) and "/live.m3u8" in str(hj.get("m3u8", "")),
+                  json.dumps({k: hj.get(k) for k in ("ok", "hops", "via", "error")})[:180])
+            check("harvest: the published clear-key pair comes back with it",
+                  (hj.get("keys") or {}).get(fixture_stream.KID_HEX) == fixture_stream.KEY_HEX,
+                  json.dumps(hj.get("keys") or {})[:160])
+            check("harvest: it carries the referer the chain walked through",
+                  "/wrap2" in str(hj.get("referer", "")), str(hj.get("referer"))[:140])
+            check("harvest: the fixture's CDN refuses that manifest without a referer",
+                  http(str(hj.get("m3u8") or ""))[0] == 403,
+                  "direct GET -> %d" % http(str(hj.get("m3u8") or ""))[0])
+
+            ck = json.loads(http(HUB + "/api/clearkey")[1] or "{}")
+            kid_b64 = base64.urlsafe_b64encode(bytes.fromhex(fixture_stream.KID_HEX)).decode().rstrip("=")
+            key_b64 = base64.urlsafe_b64encode(bytes.fromhex(fixture_stream.KEY_HEX)).decode().rstrip("=")
+            check("clearkey: the JWK set hls.js asks for answers with that pair",
+                  any(k.get("kid") == kid_b64 and k.get("k") == key_b64
+                      for k in (ck.get("keys") or [])),
+                  json.dumps(ck)[:200])
+
+            m3u8 = str(hj.get("m3u8") or "")
+            ref = str(hj.get("referer") or "")
+            pr = json.loads(http(HUB + "/api/play?u=" + urllib.parse.quote(m3u8, safe="") +
+                                 "&r=" + urllib.parse.quote(ref, safe=""), timeout=45)[1] or "{}")
+            seen_ref = wait(lambda: next((h for h in fixture_stream.STATE["hls"]
+                                          if "/wrap2" in h.get("referer", "")), None), 25, 0.5)
+            check("relay: it pulls the harvested feed with that referer",
+                  bool(pr.get("ok")) and bool(seen_ref),
+                  "port=%s  CDN saw referer=%s" % (pr.get("port"),
+                                                   (seen_ref or {}).get("referer", "-")[:80]))
 
             errors = [c for c in console
                       if (c.startswith("pageerror") or

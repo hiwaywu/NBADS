@@ -121,8 +121,8 @@ def main():
     hub_src = os.path.join(ROOT, "nba", "hub")
     hub_dst = os.path.join(OUT, "nba", "hub")
     os.makedirs(hub_dst)
-    for name in ("NBAHub.exe", "hub.py", "index.html", "hls.min.js", "probe_play.py",
-                 "find_stream.py", "harvest.py", "NBAHUB.bat", "FIREWALL.bat"):
+    for name in ("NBAHub.exe", "hub.py", "index.html", "hls.min.js", "shaka.js",
+                 "probe_play.py", "find_stream.py", "harvest.py", "NBAHUB.bat", "FIREWALL.bat"):
         src = os.path.join(hub_src, name)
         if os.path.isfile(src):
             shutil.copy2(src, hub_dst)

@@ -663,3 +663,42 @@ Verified with the tree that ships: `tools/verify_inapp_game.py` 20/20 (PC), and
 `tools/verify_android_inapp.py` 14/14 on the Pixel 7 / Android 15 emulator with the APK built
 from it. Neither harness covers the harvest chain against a live mirror -- that needs a game in
 progress; the fixture covers the fallback path and the ad gates.
+
+---
+
+## 2.7 -- PC parity: the same walk, no browser
+
+The phone resolved a game to a manifest with plain GETs while the PC still launched Playwright
+for the same job. That asymmetry had two costs: the portable bundle (no Playwright, no browser)
+could not use the harvest at all, and the PC paid ~8 s and a browser launch per game.
+
+`hub.py` now carries the Java walker as `harvest_http()` / `_follow_chain()`: the same hop cap,
+the same regexes (`globalurl`, `DIRECT_STREAM_URL`, rotator `"value"`, `.m3u8`/`.mpd`), the same
+`&sessionId=<guid>` append, the same `masterinf` capture. `/api/harvest` answers from it first and
+falls back to `harvest.py` only when the walk fails -- which is exactly the case the browser is
+good at (a player that builds its URL on a click, a cookie wall).
+
+Three pieces had to follow:
+
+- **`/api/clearkey`**: the JWK set hls.js asks for when the feed is SAMPLE-AES and the provider
+  published the pair. `HARVEST_KEYS` holds the last walk's pair; `/api/keys` (POST) lets the page
+  hand one back, which is how the phone does it.
+- **`relay.py --referer`**: a harvested feed's CDN answers the page the chain walked through and
+  403s everything else. `start_relay(url, low, referer)` passes it, `/api/play?r=` carries it, and
+  the session sets both `Referer` and `Origin` -- `Origin` because the same CDN checks it on the
+  playlist.
+- **`/shaka.js`**: the page loads it with `defer`, and the hub was not serving it -- a 404 there
+  only disables the Shaka path (the one that plays a CENC feed with `drm.clearKeys`), which is the
+  worst kind of failure: silent, and only on the PC.
+
+Fixture additions, so this is measured rather than argued: `/chain` lists `/main/7`, which frames
+`/wrap2`, which names `globalurl = '/live.m3u8'` and carries
+`masterinf = {"00112233...": "0f0e0d0c..."}`. The fixture's `/live.m3u8` answers **403** unless
+the Referer contains `/wrap2`, so four checks cannot pass by accident: the manifest found in 2
+hops, the key pair returned with it, the JWK set matching the pair, and the CDN seeing the referer
+the relay actually sent.
+
+```text
+python tools/verify_inapp_game.py     26/26   (PC, real --app window over CDP)
+python tools/verify_android_inapp.py  14/14   (Pixel 7 / Android 15 emulator, release APK)
+```

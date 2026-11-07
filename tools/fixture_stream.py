@@ -31,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIP = os.path.join(os.path.dirname(HERE), "docs", "white1080.mp4")
 
-STATE = {"license": [], "embed": [], "clip": 0, "main": [], "report": []}
+STATE = {"license": [], "embed": [], "clip": 0, "main": [], "report": [], "hls": []}
 
 MAIN = """<!doctype html><html><head><meta charset="utf-8"><title>main __N__</title>
 <style>html,body{margin:0;background:#000;height:100%}iframe{position:absolute;inset:0;
@@ -136,6 +136,27 @@ width:180px;height:180px;border-radius:90px;background:rgba(255,255,255,0.25)}</
 
 REFUSED = "<html><body>This stream is not available here</body></html>"
 
+# ---- the wrapper chain the harvest has to walk -------------------------------
+# event page -> wrap1 (a static iframe) -> wrap2 (names the manifest and leaks the
+# clear key next to it). This is the shape the phone resolves without a browser, and
+# the shape the PC now walks the same way.
+KID_HEX = "00112233445566778899aabbccddeeff"
+KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
+
+CHAIN = """<!doctype html><html><head><meta charset="utf-8"><title>chain event</title></head>
+<body><h1>chain event</h1><a href="__MAIN7__">Main 7</a></body></html>"""
+
+WRAP1 = """<!doctype html><html><head><meta charset="utf-8"><title>wrap 1</title></head>
+<body><p>one wrapper</p>
+<iframe src="/wrap2" allow="autoplay; fullscreen; encrypted-media"></iframe></body></html>"""
+
+WRAP2 = """<!doctype html><html><head><meta charset="utf-8"><title>wrap 2</title></head>
+<body><p>the page that names the manifest</p>
+<script>
+  var globalurl = '/live.m3u8';
+  var masterinf = {"__KID__": "__KEY__"};
+</script></body></html>"""
+
 
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -190,6 +211,42 @@ class H(BaseHTTPRequestHandler):
             return self._html(200, EVENT)
         if path == "/adtest":
             return self._html(200, ADTEST)
+        if path == "/chain":
+            return self._html(200, CHAIN.replace("__MAIN7__", self.origin + "/main/7"))
+        if path == "/main/7":
+            # the wrapper the event page links to: not a player, just another hop
+            return self._html(200, WRAP1)
+        if path == "/wrap1":
+            return self._html(200, WRAP1)
+        if path == "/wrap2":
+            return self._html(200, WRAP2.replace("__KID__", KID_HEX).replace("__KEY__", KEY_HEX))
+        if path == "/live.m3u8":
+            ref = self.headers.get("Referer") or ""
+            STATE["hls"].append({"path": path, "referer": ref,
+                                 "ua": self.headers.get("User-Agent") or ""})
+            if "/wrap2" not in ref:
+                # the CDN answers only the page it belongs to -- the reason a
+                # harvested feed needs the Referer the chain walked through
+                return self._text(403, "no referer")
+            body = ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n"
+                    "#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.0,\n/seg1.ts\n"
+                    "#EXTINF:4.0,\n/seg2.ts\n#EXTINF:4.0,\n/seg3.ts\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            return
+        if path.startswith("/seg") and path.endswith(".ts"):
+            blob = b"\x00" * 188
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp2t")
+            self.send_header("Content-Length", str(len(blob)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(blob)
+            return
         if path == "/adwin":
             return self._html(200, ADWIN, {"X-Frame-Options": "SAMEORIGIN"})
         if path == "/tapad":
