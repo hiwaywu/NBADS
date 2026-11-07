@@ -32,3 +32,4 @@ android/NBAHub.apk
 
 # portable bundle build output
 build-portable/
+releases/*-oldkey.apk
