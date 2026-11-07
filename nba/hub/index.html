@@ -104,6 +104,15 @@
   }
   #stage:fullscreen #reloadStream,#stage:-webkit-full-screen #reloadStream{display:none !important}
   #fsexit{display:none}
+  /* In fullscreen the picture is the only thing on screen. On a phone there is no
+     pointer that "moves away", so a button drawn in the corner stays there forever --
+     and the platform's own control bar keeps its progress row on screen too. Both
+     fade out after a couple of quiet seconds and come back on a tap. */
+  #fsexit,#bar,#stage #unmute{transition:opacity .25s ease}
+  body.fsfade #fsexit,body.fsfade #bar,body.fsfade #stage #unmute{
+    opacity:0 !important;pointer-events:none !important;
+  }
+  body.fsfade{cursor:none}
   #stage:fullscreen #fsexit,#stage:-webkit-full-screen #fsexit{
     display:block;position:absolute;top:12px;right:14px;z-index:40;
     background:rgba(18,20,24,.72);border:1px solid #2c3038;color:#c9cdd6;border-radius:8px;
@@ -1243,7 +1252,9 @@ function popupAllowed(u){
 }
 window.addEventListener('message', function(ev){
   const d = ev.data;
-  if (!d || typeof d !== 'object' || !d.nba_popup) return;
+  if (!d || typeof d !== 'object') return;
+  if (d.nba_wake){ fsUiWake(); return; }        // a touch landed inside the player frame
+  if (!d.nba_popup) return;
   const u = String(d.nba_popup);
   if (!popupAllowed(u)){
     toast('an ad asked for a window - dropped', 2200);
@@ -1501,6 +1512,10 @@ function exitFullscreen(){
 // so hand the decision to MainActivity (Hub.setFullscreen) on every change.
 function tellAppFullscreen(on){
   try { if (window.Hub && Hub.setFullscreen) Hub.setFullscreen(!!on); } catch(e){}
+  // the app's own fullscreen (landscape, no system bars) is not the Fullscreen API,
+  // so the page has to remember it itself -- otherwise the chrome never fades there
+  document.body.classList.toggle('appfs', !!on);
+  if (on) fsUiWake(); else fsUiReset();
 }
 $('#fs').onclick = () => {
   tellAppFullscreen(true); if (isFullscreen()){ exitFullscreen(); return; }
@@ -1523,12 +1538,43 @@ $('#fs').onclick = () => {
   toast('fullscreen is not available here', 2200);
 };
 $('#fsexit').onclick = () => exitFullscreen();
+
+// ---- fullscreen chrome that gets out of the way -------------------------
+// Two exits are in play on a phone: the Fullscreen API (which the WebView renders
+// through onShowCustomView) and the app's own "landscape + no system bars" mode
+// (Hub.setFullscreen). Both count as fullscreen here, so the same rule holds
+// whichever one you landed in: nothing on screen but the picture, unless you touch.
+function fsActive(){
+  return isFullscreen() || document.body.classList.contains('appfs');
+}
+let fsIdle = null;
+function fsUiWake(){
+  document.body.classList.remove('fsfade');
+  if (fsIdle) clearTimeout(fsIdle);
+  fsIdle = null;
+  if (!fsActive()) return;
+  fsIdle = setTimeout(function(){
+    // the platform's progress bar is the other thing that never leaves
+    if (IS_MOBILE) { try { v.controls = false; } catch(e){} }
+    document.body.classList.add('fsfade');
+  }, 2600);
+}
+function fsUiReset(){
+  if (fsIdle) clearTimeout(fsIdle);
+  fsIdle = null;
+  document.body.classList.remove('fsfade');
+  try { v.controls = true; } catch(e){}
+}
+['pointerdown','pointermove','touchstart','keydown','wheel'].forEach(function(ev){
+  document.addEventListener(ev, function(){ if (fsActive()) fsUiWake(); }, { passive: true });
+});
 // keep the button label honest whichever way fullscreen ends (Esc included)
 ['fullscreenchange','webkitfullscreenchange'].forEach(function(ev){
   document.addEventListener(ev, function(){
     const b = $('#fs');
     if (b) b.textContent = isFullscreen() ? 'exit full' : 'fullscreen';
     tellAppFullscreen(isFullscreen());
+    if (isFullscreen()) fsUiWake(); else fsUiReset();
   });
 });
 $('#low').onclick = () => {

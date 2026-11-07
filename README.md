@@ -119,7 +119,10 @@ Details worth knowing:
   so nothing falls off the edge. Folding/unfolding mid-stream does not restart playback.
 - **fullscreen** â€” the picture is letterboxed to the stream's own ratio, never stretched:
   measured 1680x945 on a 16:10 1680x1050 screen (16:9 stream), and 1080x609 on a 1080x2400
-  phone. `âœ• exit full` sits in the corner, Esc works too.
+  phone. `âœ• exit full` fades out after ~2.6 s of quiet and comes back on a touch (the touch is forwarded out of
+  the player frame, so tapping the picture counts too). While fullscreen is on, the phone's own
+  control bar -- the progress row that used to sit there forever -- is switched off. Esc works
+  too, and Back on the phone.
 - Keys on the PC: `f` fullscreen, `m` mute, `r` reload the feed (plus Esc to leave fullscreen).
 - `frozen?` â€” one tap logs a freeze so the switching policy can act; a cross-origin frame
   cannot be watched by code.

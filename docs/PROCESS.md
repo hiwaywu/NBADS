@@ -702,3 +702,33 @@ the relay actually sent.
 python tools/verify_inapp_game.py     26/26   (PC, real --app window over CDP)
 python tools/verify_android_inapp.py  14/14   (Pixel 7 / Android 15 emulator, release APK)
 ```
+
+---
+
+## 2.8 -- fullscreen means the picture, nothing else
+
+On a phone there is no pointer to move away, so anything drawn in a corner stays there for
+as long as the stream runs. Two things did: our `✕ exit full` button, and the platform's own
+control bar with its progress row.
+
+The rule now: entering fullscreen starts a 2.6 s idle timer; when it fires, `body` gets
+`fsfade`, which takes `#fsexit`, `#bar` and the sound chip to `opacity: 0` and
+`pointer-events: none`, hides the cursor, and (mobile only) sets `v.controls = false` so the
+platform stops drawing its progress row. Any touch, move, key or wheel wakes it: the class comes
+off, the timer restarts. Leaving fullscreen resets everything, including `v.controls = true`.
+
+Two details that made this less obvious than it looks:
+
+- **There are two fullscreens on the phone.** The Fullscreen API (rendered by the WebView through
+  `onShowCustomView`) and the app's own "landscape + no system bars" mode (`Hub.setFullscreen`).
+  The second never fires `fullscreenchange`, so `tellAppFullscreen()` now toggles `body.appfs` and
+  `fsActive()` accepts either one. Without that the chrome never faded in app-landscape mode.
+- **A touch inside the player frame never reaches the page.** In `iframeMode` the fullscreened
+  element is `#pf`, so `pointermove` fires in the *proxied* document and the hub page stays deaf
+  -- the timer never woke and the button stayed hidden (measured: check `fullscreen: one touch
+  brings them back` failed with `{"faded": true}`). The injected patch now posts one throttled
+  `{nba_wake: 1}` to the top window per gesture, and the page's message handler calls `fsUiWake()`.
+
+Measured: `python tools/verify_inapp_game.py` **29/29**, including the fade, the wake-through-frame
+and the restore on exit; `python tools/verify_android_inapp.py` **14/14** on the emulator, and the
+APK's `assets/index.html` is byte-identical to the repo page (sha256 compared at build time).

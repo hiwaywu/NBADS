@@ -1055,7 +1055,22 @@ PATCH_JS = """
     return fakeWin;
   };
 
-  // ---- 5. keep nested frames in the proxy ------------------------------
+  // ---- 5. tell the hub page when this frame is touched -------------------
+  // When the player frame itself is the fullscreened element, pointer events never
+  // reach the hub page, so its "hide the chrome, show it on touch" logic goes deaf.
+  // One throttled message per gesture is enough to wake it.
+  var lastWake = 0;
+  function wake() {
+    var now = Date.now();
+    if (now - lastWake < 250) return;
+    lastWake = now;
+    try { if (REAL_TOP && REAL_TOP !== window) REAL_TOP.postMessage({ nba_wake: 1 }, '*'); } catch (e) {}
+  }
+  ['pointerdown', 'pointermove', 'touchstart', 'keydown', 'wheel'].forEach(function (ev) {
+    try { document.addEventListener(ev, wake, { passive: true }); } catch (e) {}
+  });
+
+  // ---- 6. keep nested frames in the proxy ------------------------------
   // Their own <iframe> is the thing the player hosts refuse to render for a
   // foreign parent. Served through /play it is a same-origin page of ours, with
   // the site's Referer on the way out.

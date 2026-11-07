@@ -337,6 +337,34 @@ def main():
                   "port=%s  CDN saw referer=%s" % (pr.get("port"),
                                                    (seen_ref or {}).get("referer", "-")[:80]))
 
+            # ---- fullscreen chrome has to get out of the way --------------------
+            page.click("#fs")
+            page.wait_for_timeout(4200)
+            fs1 = page.evaluate("""() => {
+                const b = document.querySelector('#fsexit');
+                const cs = getComputedStyle(b);
+                return {full: !!document.fullscreenElement,
+                        faded: document.body.classList.contains('fsfade'),
+                        opacity: cs.opacity, pe: cs.pointerEvents};
+            }""")
+            check("fullscreen: the exit button and the control bar fade out on their own",
+                  fs1.get("full") and fs1.get("faded") and fs1.get("opacity") == "0",
+                  json.dumps(fs1)[:180])
+            page.mouse.move(320, 300)
+            page.wait_for_timeout(700)
+            fs2 = page.evaluate("""() => ({faded: document.body.classList.contains('fsfade'),
+                    opacity: getComputedStyle(document.querySelector('#fsexit')).opacity})""")
+            check("fullscreen: one touch brings them back",
+                  (not fs2.get("faded")) and fs2.get("opacity") != "0", json.dumps(fs2)[:120])
+            page.evaluate("() => { if (document.fullscreenElement && document.exitFullscreen)"
+                          " document.exitFullscreen(); }")
+            page.wait_for_timeout(900)
+            fs3 = page.evaluate("""() => ({full: !!document.fullscreenElement,
+                    faded: document.body.classList.contains('fsfade'),
+                    controls: (document.querySelector('video') || {}).controls})""")
+            check("fullscreen: leaving it restores the bar and the controls",
+                  (not fs3.get("faded")) and fs3.get("controls") is not False, json.dumps(fs3)[:140])
+
             errors = [c for c in console
                       if (c.startswith("pageerror") or
                           (c.startswith("error") and "Failed to load resource" not in c))
