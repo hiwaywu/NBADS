@@ -622,3 +622,44 @@ Measured after the gate (the fixture now serves `/adwin` and `/tapad` as well):
 python tools/verify_inapp_game.py      20/20   (PC, real --app window over CDP)
 python tools/verify_android_inapp.py   14/14   (Pixel 7 / Android 15 emulator, release APK)
 ```
+
+---
+
+## 2.6 -- the picture without the page: harvest, then clear-key EME
+
+The player page was always the fragile half: it is where the ads live, it needs the site's
+`Referer` to be believed, and on a phone it needs a Widevine CDM. So the app now tries to own
+the picture before it navigates anywhere.
+
+`LocalHub./api/harvest` walks the `Main N` chain with plain `Http.get` -- event page, then each
+iframe the chain builds, then the page that names the manifest -- and looks for, in that order:
+`globalurl = '...'`, `DIRECT_STREAM_URL = '...'`, a rotator `"value": "..."`, or any hard-coded
+`.m3u8`/`.mpd`. No page JS runs, so no ad iframe, tracker or popup from that page ever loads.
+The manifest goes to `/api/play`, i.e. the relay, i.e. our own `<video>`.
+
+The second half is the part worth being explicit about: some providers ship
+`masterinf = {"<kid hex>": "<key hex>"}` next to the manifest. When the harvest sees that pair,
+`/api/clearkey` serves it as a JWK set and hls.js is configured with
+`drmSystems = {'org.w3.clearkey': {licenseUrl: '/api/clearkey'}}`. EME decrypts the
+SAMPLE-AES segments without any license server -- the key was published in the page, not
+extracted by us. That is why the README's "the hub never touches a key" is now split into two
+paths: user-supplied clear keys for harvested feeds, and real Widevine through the browser's CDM
+for everything else.
+
+Notes that cost time:
+
+- **`/api/play` needed a per-request `Referer`** (`?r=<player page>`). Harvested feeds are not
+  in `feeds.txt`, so the third column cannot carry it: `startRelay(u, low, ref)` it is.
+- **`Games.feedLinks` had to grow two more skins**: `/main/N` printed relative to the event page,
+  and `data-e="/main/N"` rows where the `href` is gone entirely. Without that the harvest has no
+  chain to walk on half the mirrors.
+- **`knownHosts` must not learn ad hosts.** The resource interceptor registered every host it saw,
+  including the ads', and the navigation guard then treated those hosts as "ours". Now an ad host
+  is filtered before it is registered.
+- **The phone's hub version is 2.2** (in `LocalHub.VERSION`) while the release is `v2.6`: the tag
+  numbers releases, the constant numbers the in-app API the page talks to.
+
+Verified with the tree that ships: `tools/verify_inapp_game.py` 20/20 (PC), and
+`tools/verify_android_inapp.py` 14/14 on the Pixel 7 / Android 15 emulator with the APK built
+from it. Neither harness covers the harvest chain against a live mirror -- that needs a game in
+progress; the fixture covers the fallback path and the ad gates.

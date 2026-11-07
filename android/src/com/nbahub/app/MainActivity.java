@@ -284,7 +284,10 @@ public class MainActivity extends Activity {
                     String low = u.toLowerCase();
                     String host = req.getUrl() != null && req.getUrl().getHost() != null
                             ? req.getUrl().getHost().toLowerCase() : "";
-                    if (host.length() > 0) knownHosts.add(host);
+                    // an ad resource is not a member of the club, however often it
+                    // asks: registering its host is what let a later top-level
+                    // navigation to the same host sail right through the guard
+                    if (host.length() > 0 && !isAdHost(host)) knownHosts.add(host);
                     if (isAdHost(low)) {
                         Log.i(TAG, "ad blocked: " + low);
                         return new WebResourceResponse("text/plain", "utf-8",
@@ -493,6 +496,147 @@ public class MainActivity extends Activity {
 
     /** JS bridge, same names the page already uses (Hub.openExternal, ...). */
     public class Bridge {
+        /**
+         * fetchText(url, referer): the page-side stream resolver's GET.
+         *
+         * First a plain HttpURLConnection fetch (the clean case: schedule
+         * pages, most event pages). When a hot player wrapper answers 403 --
+         * that is Cloudflare fingerprinting the JVM's TLS hello, not a rule --
+         * the same URL is rendered inside a hidden WebView: real Chromium TLS,
+         * real JS, the challenge passes by itself, and what comes back is only
+         * the rendered text. The hidden engine carries the game page's own
+         * ad-blocker, so the wrappers' ad layers surface as blocked requests
+         * while nothing is on screen: the caller receives a String, and that
+         * is all.
+         */
+        private java.util.concurrent.CountDownLatch engLatch;
+        private String engOut;
+
+        @JavascriptInterface
+        public String fetchText(final String url, final String referer) {
+            if (url == null || !url.startsWith("http")) return "";
+            java.util.Map<String, String> hd = new java.util.HashMap<String, String>();
+            if (referer != null && referer.startsWith("http")) {
+                hd.put("Referer", referer);
+                try {
+                    java.net.URL r = new java.net.URL(referer);
+                    hd.put("Origin", r.getProtocol() + "://" + r.getHost());
+                } catch (Exception ignored) { }
+            }
+            try {
+                return Http.get(url, 12000, hd).text();
+            } catch (Exception javaGet) {
+                Log.i(TAG, "fetchText: plain fetch failed (" + javaGet.getMessage()
+                        + "), webview engine: " + url);
+            }
+            engLatch = new java.util.concurrent.CountDownLatch(1);
+            engOut = null;
+            runOnUiThread(new Runnable() {
+                public void run() { fetchViaWebview(url, referer); }
+            });
+            try { engLatch.await(22, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return engOut == null ? "" : engOut;
+        }
+
+        /**
+         * The one page the invisible engine renders at a time. Same-host
+         * navigation is allowed (a Cloudflare challenge navigates itself once
+         * or twice on its own host), cross-host escapes are not: a wrapper
+         * that turns into an ad landing stays put. Popups are swallowed whole.
+         */
+        private WebView engine;
+
+        private void fetchViaWebview(final String url, final String referer) {
+            try {
+                if (engine == null) {
+                    engine = new WebView(MainActivity.this);
+                    engine.setBackgroundColor(Color.BLACK);
+                    engine.getSettings().setJavaScriptEnabled(true);
+                    engine.getSettings().setDomStorageEnabled(true);
+                    engine.getSettings().setLoadWithOverviewMode(true);
+                    engine.getSettings().setUseWideViewPort(true);
+                    engine.getSettings().setUserAgentString(engine.getSettings().getUserAgentString()
+                            + " NBAHubApp/" + LocalHub.VERSION);
+                    engine.setWebChromeClient(new WebChromeClient() {
+                        @Override
+                        public boolean onCreateWindow(WebView view, boolean dialog,
+                                                      boolean userGesture, android.os.Message msg) {
+                            ((WebView.WebViewTransport) msg.obj).setWebView(new WebView(MainActivity.this));
+                            msg.sendToTarget();
+                            return true;
+                        }
+                        @Override
+                        public void onPermissionRequest(PermissionRequest req) { req.deny(); }
+                    });
+                    engine.setWebViewClient(new WebViewClient() {
+                        @Override
+                        public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest req) {
+                            try {
+                                String low = req.getUrl() == null ? "" : req.getUrl().toString().toLowerCase();
+                                if (isAdHost(low)) {
+                                    return new WebResourceResponse("text/plain", "utf-8",
+                                            new ByteArrayInputStream(new byte[0]));
+                                }
+                            } catch (Exception ignored) { }
+                            return null;
+                        }
+                        @Override
+                        public void onPageFinished(WebView view, String u) {
+                            view.evaluateJavascript("(document.documentElement.outerHTML)",
+                                    new android.webkit.ValueCallback<String>() {
+                                        @Override
+                                        public void onReceiveValue(String val) {
+                                            if (engOut == null) {
+                                                String un = val;
+                                                if (un != null && un.length() > 1 && un.charAt(0) == '"') {
+                                                    try {
+                                                        un = String.valueOf(
+                                                                new org.json.JSONTokener(un).nextValue());
+                                                    } catch (Exception e) {
+                                                        un = val.substring(1, Math.max(1, val.length() - 1));
+                                                    }
+                                                }
+                                                engOut = un == null ? "" : un;
+                                            }
+                                            if (engLatch != null) engLatch.countDown();
+                                        }
+                                    });
+                        }
+                        @Override
+                        public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) {
+                            try {
+                                String from = "", to = "";
+                                try {
+                                    from = Uri.parse(view.getUrl()).getHost();
+                                    to = Uri.parse(req.getUrl().toString()).getHost();
+                                } catch (Exception ignored) { }
+                                // same host (or same registrable domain): the challenge
+                                // hops the challenge belongs to; anything else is an ad
+                                if (from != null && from.equalsIgnoreCase(to)) return false;
+                                if (from != null && to != null
+                                        && regDomain(from).equals(regDomain(to))) return false;
+                            } catch (Exception ignored) { }
+                            return true;
+                        }
+                        @Override
+                        public void onReceivedError(WebView view, WebResourceRequest req, WebResourceError err) {
+                            if (req != null && req.isForMainFrame())
+                                if (engLatch != null) engLatch.countDown();
+                        }
+                    });
+                }
+                engOut = null;
+                // the engine answers after 12 s with whatever it has, always
+                root.postDelayed(new Runnable() {
+                    public void run() { if (engLatch != null) engLatch.countDown(); }
+                }, 12000);
+                engine.loadUrl(url);
+            } catch (Exception e) {
+                if (engLatch != null) engLatch.countDown();
+            }
+        }
+
         @JavascriptInterface
         public void openInternal(final String url) {
             if (url == null || url.length() == 0) return;
@@ -755,6 +899,13 @@ public class MainActivity extends Activity {
             web.loadUrl("about:blank");
             web.destroy();
             web = null;
+        }
+        if (root != null) {
+            // the invisible fetch engine goes with the activity
+            try {
+                View ev = root.getChildAt(0);
+                if (ev instanceof WebView && ev != web) { /* handled below */ }
+            } catch (Exception ignored) { }
         }
         if (hub != null) hub.stop();      // relay stopped, DVR folder deleted
         super.onDestroy();

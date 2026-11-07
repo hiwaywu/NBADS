@@ -456,7 +456,7 @@ async function loadGames(){
   render();
 }
 
-async function playChannel(c, byMirror){
+async function playChannel(c, byMirror, keys){
   // what is on screen now: a mirror that refuses to start must not take the
   // title (or the failover position) from the stream that is still playing
   const prev = { ch: lastChannel, idx: mirrorIdx, title: $('#nowTitle').textContent };
@@ -469,7 +469,11 @@ async function playChannel(c, byMirror){
   $('#pillQ').style.display = 'none';
   $('#pillBuf').style.display = 'none';
   try {
-    const q = '/api/play?u=' + encodeURIComponent(c.url) + (lowMode ? '&low=1' : '');
+    // r=<player page>: a harvested game feed carries the Referer its own
+    // server expects; feeds.txt channels keep the list's third column
+    const q = '/api/play?u=' + encodeURIComponent(c.url) +
+              (c.referer ? '&r=' + encodeURIComponent(c.referer) : '') +
+              (lowMode ? '&low=1' : '');
     const j = await fetch(q).then(r => r.json());
     if (!j.ok) throw new Error(j.error || 'relay failed');
     const st = j.stats || {}, variant = st.variant || {};
@@ -481,7 +485,7 @@ async function playChannel(c, byMirror){
     }
     const srcPill = $('#pillSrc');
     if (srcPill){ srcPill.textContent = 'relay - ' + (c.name || 'channel'); srcPill.className = 'pill good'; srcPill.style.display = ''; }
-    attach(j.url);
+    attach(j.url, keys);
     toast('relay up - buffering the live edge');
     pollStats();
   } catch(e){
@@ -605,7 +609,7 @@ function hlsConfig(){
   };
 }
 
-function attach(url){
+function attach(url, keys){
   const _pf = $('#pf'); if (_pf) { _pf.style.display = 'none'; _pf.removeAttribute('src'); }
   if (pol.timer) { clearInterval(pol.timer); pol.timer = null; pol.game = null; }
   document.body.classList.remove('iframeMode');
@@ -618,7 +622,16 @@ function attach(url){
   v.removeAttribute('src');
   setSpin(true, 'starting the stream...');
   if (window.Hls && Hls.isSupported()){
-    hls = new Hls(hlsConfig());
+    const cfg = hlsConfig();
+    // A harvested feed may be Widevine-packaged, but the provider leaks the
+    // clear-key pair next to it. EME in the secure 127.0.0.1 webview can decrypt
+    // it with org.w3.clearkey and no license server: the hub answers the JWK
+    // challenge at /api/clearkey out of the pair it harvested.
+    if (keys && typeof keys === 'object' && Object.keys(keys).length){
+      cfg.emeEnabled = true;
+      cfg.drmSystems = { 'org.w3.clearkey': { licenseUrl: '/api/clearkey' } };
+    }
+    hls = new Hls(cfg);
     hls.loadSource(url);
     hls.attachMedia(v);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -842,6 +855,120 @@ async function reportFreeze(){
 
 let lastGame = null;
 
+// ---------------------------------------------------------------- harvest
+// The page-side stream resolver. The providers hide the manifest behind a
+// chain of wrapper pages; the last wrapper in every family so far names it in
+// plain script: a `globalurl = '<m3u8>'` constant (League Pass clones), a
+// DIRECT_STREAM_URL constant (the crackstreams-style own-CDN restream), a
+// stream URL anywhere in the text, or a JSON rotator whose first entry is the
+// real target. Some providers ship the clear-key pair next to it
+// (masterinf = {"<kid hex>": "<key hex>"}), which lets org.w3.clearkey
+// decrypt an encrypted feed without a license server.
+const RX_GLOBALURL = /globalurl\s*=\s*['"]([^'"\r\n]+)['"]/i;
+const RX_DIRECT    = /DIRECT_STREAM_URL\s*=\s*['"]([^'"\r\n]+)['"]/i;
+const RX_M3U8      = /(https?:\/\/[^"'\s<>\\]+?\.(?:m3u8|mpd)[^"'\s<>\\]*)/i;
+const RX_IFRAME    = /<iframe[^>]*?\bsrc\s*=\s*['"]([^'"]+)['"]/i;
+const RX_JS_SRC    = /\.src\s*=\s*['"](https?:\/\/[^'"\r\n]+)['"]/;
+const RX_MASTERINF = /masterinf\s*=\s*\{([^}]{10,600})\}/i;
+const RX_KEYKV     = /"?([0-9a-fA-F]{16,64})"?\s*:\s*"?([0-9a-fA-F]{16,64})"?/g;
+const RX_ADISH     = /doubleclick|googlesyndication|adservice|popads|adcash|propellerads|histats\.com|onclick|hilltopads|exoclick/i;
+
+function adish(u){ return RX_ADISH.test(u || ''); }
+function joinUrl(base, ref){
+  try { return new URL(ref, base).toString(); } catch(e){ return ref; }
+}
+function hostOf2(u){ try { return new URL(u).hostname; } catch(e){ return ''; } }
+
+// one GET, wrapped: the app's plain fetch first (its HttpURLConnection has the
+// schedule-site cookies state), and its invisible engine when a host 403s the
+// plain path. Outside the app this is a plain fetch and the walker still
+// works for every provider that does not fingerprint TLS.
+async function hubFetch(u, referer){
+  if (STANDALONE && window.Hub && Hub.fetchText) return Hub.fetchText(u, referer || '');
+  const hd = { 'Accept-Language': 'en-US,en;q=0.9' };
+  if (referer) hd['Referer'] = referer;
+  const r = await fetch(u, { headers: hd });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.text();
+}
+
+function keysFrom(text){
+  const m = RX_MASTERINF.exec(text);
+  if (!m) return null;
+  const out = {};
+  RX_KEYKV.lastIndex = 0;
+  let km;
+  while ((km = RX_KEYKV.exec(m[1]))) out[km[1].toLowerCase()] = km[2].toLowerCase();
+  return Object.keys(out).length ? out : null;
+}
+
+/** next wrapper URL a page hands the picture to, or a manifest it names */
+function directIn(text){
+  let m = RX_GLOBALURL.exec(text);
+  if (m) return m[1];
+  m = RX_DIRECT.exec(text);
+  if (m) return m[1];
+  m = RX_M3U8.exec(text);
+  if (m) return m[1];
+  return null;
+}
+function nextHopIn(text){
+  let m = RX_IFRAME.exec(text);
+  if (!m){
+    m = RX_JS_SRC.exec(text);
+    if (m){
+      // "iframe" must sit near the .src line: an ad's random .src would not
+      const at = m.index;
+      const ctx = text.slice(Math.max(0, at - 260), at + 260).toLowerCase();
+      if (ctx.includes('iframe') && !adish(m[1])) return m[1];
+      return null;
+    }
+  }
+  if (m && !adish(m[1])) return m[1];
+  return null;
+}
+
+async function harvestChain(g){
+  let links = [];
+  try {
+    const j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json());
+    if (j && j.links && j.links.length) links = j.links.slice(0, 4);
+  } catch(e){}
+  if (!links.length) links = [g.url];
+  const report = { tried: [] };
+  for (const main of links){
+    let u = main, referer = g.url, keys = null;
+    const docs = [];
+    for (let hop = 0; hop < 6; hop++){
+      if (!u || docs.includes(u)) break;
+      let text = '';
+      try { text = await hubFetch(u, referer); }
+      catch(e){ report.tried.push('hop ' + hop + ' (' + hostOf2(u) + ') failed: ' + e.message); break; }
+      docs.push(u);
+      const k = keysFrom(text);
+      if (k) keys = k;
+      const found = directIn(text);
+      if (found){
+        return {
+          ok: true, m3u8: joinUrl(u, found),
+          via: hostOf2(found), referer: u, keys: keys, hops: docs
+        };
+      }
+      const nxt = nextHopIn(text);
+      if (!nxt){
+        report.tried.push('hop ' + hop + ' (' + hostOf2(u) + ') names no iframe and no stream');
+        break;
+      }
+      referer = u;
+      u = joinUrl(u, nxt);
+      if (adish(u)) break;
+    }
+  }
+  console.log('harvest failed:', report.tried);
+  return { ok: false, ...report };
+}
+
+
 // One place that opens the player frame, and one guard on it. A framed copy of a
 // player page is still a page somebody else wrote: it can navigate itself to an
 // ad wall or a "update your browser" screen. The proxy is our own origin, so the
@@ -952,6 +1079,34 @@ async function watchGame(g){
   // in-page iframe stays black. A top-level navigation to the https player is
   // a secure context and the only path that can decrypt on a phone.
   if (IS_MOBILE){
+    // ---- resolve to the actual stream, not to the page that plays it ----
+    // The "Main N" page is wrapper after wrapper until one of them names the
+    // manifest (and usually leaks the clear-key pair alongside it). The walk
+    // happens here, one plain GET at a time through the app: when a wrapper's
+    // host 403s the plain fetch (Cloudflare fingerprints JVM TLS), the app
+    // renders that single page inside its invisible engine and hands back
+    // only the rendered text. No JS from any of these hosts runs on the
+    // visible screen, so the ad layers never reach the user.
+    if (STANDALONE){
+      setSpin(true, 'resolving the stream link directly...');
+      $('#nowTitle').textContent = g.name;
+      try {
+        const h = await harvestChain(g);
+        if (h && h.m3u8){
+          if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+          lastChannel = null;
+          document.body.classList.remove('iframeMode');
+          const srcPill = $('#pillSrc');
+          if (srcPill){
+            srcPill.textContent = 'direct feed - no ads' + (h.via ? ' \u00b7 via ' + h.via : '');
+            srcPill.className = 'pill good'; srcPill.style.display = '';
+          }
+          toast('direct feed resolved - playing in-app', 3000);
+          await playChannel({ name: g.name, url: h.m3u8, referer: h.referer }, false, h.keys);
+          return;
+        }
+      } catch(e){ toast('direct resolve failed (' + e.message + ') - opening the player page', 3200); }
+    }
     let j = null;
     try { j = await fetch('/api/resolve?u=' + encodeURIComponent(g.url)).then(r => r.json()); } catch(e){}
     setSpin(false);

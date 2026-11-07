@@ -330,13 +330,37 @@ final class Games {
     // -------------------------------------------------------- game pages
 
     private static final Pattern MAIN = Pattern.compile("https?://[^\"'<>\\s]+?/main/(\\d+)");
+    private static final Pattern MAIN_REL = Pattern.compile(
+            "[\"'](/[^\"'\\s]{0,200}/main/(\\d+))[\"']");
+    private static final Pattern MAIN_SRC = Pattern.compile(
+            "data-e=[\"']([^\"']+)[\"'][^>]*", Pattern.CASE_INSENSITIVE);
 
-    /** All 'Main N' player links on an event page, in order. */
+    /** All 'Main N' player links on an event page, in order. The skins differ:
+     *  some print absolute URLs, some print /main/N relative to the event, and
+     *  some carry the player page in a data-e= attribute instead of an href. */
     static List<String> feedLinks(String page) {
         final List<String> out = new ArrayList<String>();
         try {
-            Matcher m = MAIN.matcher(Http.text(page, 15000));
+            String html = Http.text(page, 15000);
+            Matcher m = MAIN.matcher(html);
             while (m.find()) if (!out.contains(m.group(0))) out.add(m.group(0));
+            if (out.isEmpty()) {
+                m = MAIN_REL.matcher(html);
+                while (m.find()) {
+                    String abs = Http.join(page, m.group(1));
+                    if (!out.contains(abs)) out.add(abs);
+                }
+            }
+            if (out.isEmpty()) {
+                // href gone entirely: the schedule rows carry data-e="<main page>"
+                m = MAIN_SRC.matcher(html);
+                while (m.find()) {
+                    String raw = m.group(1).replace("&amp;", "&");
+                    if (raw.indexOf("/main/") < 0) continue;
+                    String abs = raw.startsWith("http") ? raw : Http.join(page, raw);
+                    if (!out.contains(abs)) out.add(abs);
+                }
+            }
         } catch (Exception ignored) { }
         Collections.sort(out, new Comparator<String>() {
             public int compare(String a, String b) { return num(a) - num(b); }

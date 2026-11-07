@@ -22,9 +22,11 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,7 +53,7 @@ import java.util.regex.Pattern;
 final class LocalHub {
 
     private static final String TAG = "nbahub.hub";
-    static final String VERSION = "2.1";
+    static final String VERSION = "2.2";
     private static final String FEEDS_REMOTE =
             "https://raw.githubusercontent.com/hiwaywu/NBADS/main/nba/feeds.txt";
 
@@ -73,6 +75,11 @@ final class LocalHub {
     private volatile String feedsFrom = "bundled";
     private final Map<String, Object[]> resolved = new HashMap<String, Object[]>();
     private final Map<String, Integer> freezes = new HashMap<String, Integer>();
+
+    /** Clear-key pair the last harvest pulled out of a player page (kid hex -> key
+     *  hex). Served to hls.js through /api/clearkey so EME can decrypt a Widevine-
+     *  packaged feed that leaks a known key without cropping a video path. */
+    private volatile Map<String, String> lastClearKeys = null;
 
     LocalHub(Context ctx) {
         final Context app = ctx.getApplicationContext();
@@ -437,9 +444,13 @@ final class LocalHub {
                 return;
             }
             boolean low = "1".equals(r.q("low"));
+            // r=<player page URL>: the Referer the harvested feed expects. Harvested
+            // game feeds do not come from feeds.txt, so their referer is per-request.
+            String ref = r.q("r");
+            if (ref.length() == 0) ref = refererFor(u);
             Relay rl;
             try {
-                rl = startRelay(u, low);
+                rl = startRelay(u, low, ref);
             } catch (Exception e) {
                 json(out, r, new JSONObject().put("ok", false).put("error", "relay failed: " + e.getMessage()));
                 return;
@@ -487,6 +498,33 @@ final class LocalHub {
                     .put("source", main).put("event", page)
                     .put("links", new JSONArray(links))
                     .put("probe", new JSONObject().put("ok", frame != null).put("note", "frame read from the page, not probed")));
+            return;
+        }
+        if (p.equals("/api/harvest")) {
+            JSONObject j;
+            try {
+                j = harvestStream(r.q("u"));
+            } catch (Exception e) {
+                j = new JSONObject().put("ok", false)
+                        .put("error", String.valueOf(e.getMessage()));
+            }
+            json(out, r, j);
+            return;
+        }
+        if (p.equals("/api/clearkey")) {
+            Map<String, String> ks = lastClearKeys;
+            JSONArray arr = new JSONArray();
+            if (ks != null) {
+                for (Map.Entry<String, String> e : ks.entrySet()) {
+                    try {
+                        arr.put(new JSONObject()
+                                .put("kty", "oct")
+                                .put("kid", b64url(hexToBytes(e.getKey())))
+                                .put("k", b64url(hexToBytes(e.getValue()))));
+                    } catch (Exception ignored) { }
+                }
+            }
+            json(out, r, new JSONObject().put("keys", arr));
             return;
         }
         if (p.equals("/api/health")) {
@@ -560,17 +598,221 @@ final class LocalHub {
         return l;
     }
 
+    // -------------------------------------------------------------- harvest
+    //
+    // The event page's "Main N" link is a wrapper chain, not a player: the page
+    // embeds an iframe, the iframe is another wrapper that builds a second iframe
+    // in JS, and the last page of the chain is the one that names the actual
+    // manifest (a globalurl constant, a DIRECT_STREAM_URL constant, a rotator
+    // entry, or a hard-coded .m3u8/.mpd URL). Some providers also leak the CDM's
+    // clear-key pair next to the manifest (masterinf = {"kid": "key"}), which is
+    // how HLS encrypted with a known key can be decrypted without a license
+    // server at all.
+    //
+    // Each hop is one plain HTTPS GET a browser would make too. When the chain
+    // lands on a manifest, /api/play hands it to the relay and the picture
+    // appears in the app's own player -- no WebView navigation, so none of the
+    // ad layers a player page drags along ever run.
+
+    private static final Pattern P_GLOBALURL = Pattern.compile(
+            "globalurl\\s*=\\s*['\"]([^'\"\\r\\n]+)['\"]", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_DIRECT = Pattern.compile(
+            "DIRECT_STREAM_URL\\s*=\\s*['\"]([^'\"\\r\\n]+)['\"]", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_VALUE = Pattern.compile(
+            "\"value\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_M3U8 = Pattern.compile(
+            "(https?://[^\"'\\\\\\s<>]+?\\.(?:m3u8|mpd)[^\"'\\\\\\s<>]*)");
+    private static final Pattern P_IFRAME = Pattern.compile(
+            "<iframe[^>]*?\\bsrc\\s*=\\s*['\"]([^'\"]+)['\"]", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_JS_SRC = Pattern.compile(
+            "\\.src\\s*=\\s*['\"](https?://[^'\"\\r\\n]+)['\"]");
+    private static final Pattern P_MASTERINF = Pattern.compile(
+            "masterinf\\s*=\\s*\\{([^}]{10,600})\\}", Pattern.CASE_INSENSITIVE);
+    private static final Pattern P_KEYKV = Pattern.compile(
+            "\"?([0-9a-fA-F]{16,64})\"?\\s*:\\s*\"?([0-9a-fA-F]{16,64})\"?");
+
+    private static String hostOf(String u) {
+        try { return new java.net.URL(u).getHost(); } catch (Exception e) { return ""; }
+    }
+
+    private static boolean isAdish(String u) {
+        String low = (u == null ? "" : u.toLowerCase());
+        return low.contains("doubleclick") || low.contains("googlesyndication")
+                || low.contains("adservice") || low.contains("popads")
+                || low.contains("adcash") || low.contains("propellerads")
+                || low.contains("histats.com") || low.contains("onclick")
+                || low.contains("hilltopads") || low.contains("exoclick");
+    }
+
+    private static String firstMatch(String text, Pattern p) {
+        Matcher m = p.matcher(text);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** masterinf = {"kid": "key"} from a wrapper page, when one is there. */
+    private static Map<String, String> keysIn(String text) {
+        Matcher m = P_MASTERINF.matcher(text);
+        if (!m.find()) return null;
+        Map<String, String> out = new HashMap<String, String>();
+        Matcher km = P_KEYKV.matcher(m.group(1));
+        while (km.find()) out.put(km.group(1).toLowerCase(Locale.US), km.group(2).toLowerCase(Locale.US));
+        return out.size() > 0 ? out : null;
+    }
+
+    /**
+     * The manifest URL a wrapper page's script carries, when it carries one.
+     * DIRECT_STREAM_URL has no manifest extension (the "application1" style) --
+     * it still answers with an HLS playlist, and the relay reparses it anyway.
+     */
+    private static String directStreamIn(String text) {
+        String u = firstMatch(text, P_GLOBALURL);
+        if (u != null) return u;
+        u = firstMatch(text, P_DIRECT);
+        if (u != null) return u;
+        Matcher m = P_M3U8.matcher(text);
+        if (m.find()) return m.group(1);
+        return null;
+    }
+
+    /**
+     * The next player URL a wrapper page hands the picture to: a static iframe,
+     * a rotator's first entry, or an iframe built in JS (".src = url" with
+     * "iframe" near it). Relative values are returned as-is; the caller joins.
+     */
+    private static String nextHopIn(String text) {
+        String u = firstMatch(text, P_IFRAME);
+        if (u == null) u = firstMatch(text, P_VALUE);
+        if (u == null) {
+            Matcher m = P_JS_SRC.matcher(text);
+            while (m.find()) {
+                String cand = m.group(1);
+                int at = m.start(1);
+                int lo = Math.max(0, at - 260);
+                String ctx = text.substring(lo, Math.min(text.length(), at + 260)).toLowerCase();
+                if (ctx.contains("iframe") && !isAdish(cand)) { u = cand; break; }
+            }
+        }
+        if (u == null || isAdish(u)) return null;
+        if (!u.startsWith("http")) return null;      // caller joins via finalUrl
+        return u;
+    }
+
+    private JSONObject harvestStream(String page) throws Exception {
+        if (page == null || page.length() == 0)
+            return new JSONObject().put("ok", false).put("error", "missing u");
+        List<String> links;
+        try { links = linksFor(page); } catch (Exception e) { links = new ArrayList<String>(); }
+        if (links.isEmpty()) links = new ArrayList<String>(java.util.Arrays.asList(page));
+        if (links.size() > 4) links = links.subList(0, 4);
+        JSONArray tried = new JSONArray();
+        JSONArray traces = new JSONArray();
+        for (String main : links) {
+            tried.put(main);
+            JSONObject hit = followChain(main, page);
+            if (hit != null && hit.optBoolean("ok")) {
+                hit.put("page", page).put("tried", tried);
+                return hit;
+            }
+            if (hit != null) traces.put(hit);
+        }
+        // keep every chain's per-hop trace on the failure: "why" beats "no"
+        return new JSONObject()
+                .put("ok", false)
+                .put("tried", tried)
+                .put("chains", traces);
+    }
+
+    /** Walk the wrapper chain until a manifest name shows up (5 hops max). */
+    private JSONObject followChain(String cur, String eventPage) {
+        String referer = (eventPage == null || eventPage.length() == 0) ? cur : eventPage;
+        Set<String> seen = new HashSet<String>();
+        Map<String, String> keys = null;
+        JSONArray trace = new JSONArray();
+        String reason = "ran out of hops";
+        for (int hop = 0; hop < 6 && cur != null; hop++) {
+            if (seen.contains(cur)) { reason = "loop at hop " + hop; break; }
+            seen.add(cur);
+            Map<String, String> hd = new HashMap<String, String>();
+            if (referer.length() > 0) hd.put("Referer", referer);
+            Http.Resp resp;
+            try {
+                resp = Http.get(cur, 15000, hd);
+            } catch (Exception e) {
+                reason = "hop " + hop + " (" + hostOf(cur) + ") failed: " + String.valueOf(e.getMessage());
+                trace.put(reason);
+                return failWith(reason, trace);
+            }
+            String text = resp.text();
+            Map<String, String> k = keysIn(text);
+            if (k != null) keys = k;
+            String found = directStreamIn(text);
+            if (found != null) {
+                found = Http.join(resp.finalUrl, found);
+                if (keys != null) lastClearKeys = keys;
+                try {
+                    return new JSONObject()
+                            .put("ok", true)
+                            .put("m3u8", found)
+                            .put("via", hostOf(found))
+                            .put("hops", seen.size())
+                            .put("referer", resp.finalUrl);
+                } catch (Exception e) {
+                    return null;
+                }
+            }
+            trace.put("hop " + hop + ": " + hostOf(cur) + " (" + text.length() + " bytes), no stream named");
+            String nxt = nextHopIn(text);
+            if (nxt == null) { reason = "hop " + hop + " (" + hostOf(cur) + ") names no iframe and no stream"; break; }
+            cur = nxt.startsWith("http") ? nxt : Http.join(resp.finalUrl, nxt);
+        }
+        return failWith(reason, trace);
+    }
+
+    private static JSONObject failWith(String reason, JSONArray trace) {
+        try {
+            return new JSONObject().put("ok", false).put("error", reason).put("trace", trace);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        byte[] b = new byte[hex.length() / 2];
+        for (int i = 0; i < b.length; i++)
+            b[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        return b;
+    }
+
+    /** JWK bytes are unpadded base64url; the harvested key material is lowercase hex. */
+    private static String b64url(byte[] b) {
+        String A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        StringBuilder sb = new StringBuilder(((b.length + 2) / 3) * 4);
+        for (int i = 0; i < b.length; i += 3) {
+            int n = Math.min(3, b.length - i);
+            int v = ((b[i] & 0xff) << 16)
+                    | ((n > 1 ? b[i + 1] & 0xff : 0) << 8)
+                    | (n > 2 ? b[i + 2] & 0xff : 0);
+            sb.append(A.charAt((v >> 18) & 63)).append(A.charAt((v >> 12) & 63));
+            if (n > 1) sb.append(A.charAt((v >> 6) & 63));
+            if (n > 2) sb.append(A.charAt(v & 63));
+        }
+        while (sb.charAt(sb.length() - 1) == '=') sb.setLength(sb.length() - 1);
+        return sb.toString();
+    }
+
     // --------------------------------------------------------------- relay
 
     /** One player at a time: a new channel retires the previous relay. */
-    private Relay startRelay(String url, boolean low) throws Exception {
+    private Relay startRelay(String url, boolean low, String refererOverride) throws Exception {
         synchronized (relayLock) {
             Relay cur = relay;
             if (cur != null && !cur.isStopped() && cur.source.equals(url) && relayLow == low) {
                 cur.lastHit = System.currentTimeMillis();
                 return cur;
             }
-            Relay n = new Relay(url, refererFor(url), low, dvrRoot());
+            String ref = (refererOverride != null && refererOverride.length() > 0)
+                    ? refererOverride : refererFor(url);
+            Relay n = new Relay(url, ref, low, dvrRoot());
             // resolve first: a dead mirror throws here and the page fails over,
             // while whatever was playing keeps playing
             n.resolve();

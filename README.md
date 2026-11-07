@@ -172,8 +172,11 @@ Better than the 1.x relay, on both counts it used to drop:
 `reload list`). Fix a dead mirror by editing that file on `main` — no APK rebuild. An optional
 third column sets a Referer for feeds that need one: `NAME | URL | https://referer/`.
 
-**Games play inside the app** on the site's own player page: the app opens the game's
-`Main N` page in its WebView, grants that page Widevine, and keeps the window the
+**Games play inside the app** -- and on the phone the app now tries to make the picture its
+own before it navigates anywhere: `/api/harvest` walks the wrapper chain server-side, takes
+the manifest, and `/api/play` hands it to the relay, so the video is our `<video>` with no
+player page, no popups and no ad layers. When the chain does not yield a playable manifest,
+it falls back to the site's own player page, and keeps the window the
 player asks for (`window.open`) in the app instead of dropping it. A `<iframe id="streamIframe">`
 and a click that hands the picture to another host of the same site are no longer
 mistaken for an ad, and neither is a `window.open()`: a navigation or a popup is accepted
@@ -304,13 +307,17 @@ that cost the most time:
 
 ## Limits, stated plainly
 
-- **Game streams are Widevine/PlayReady DRM**, and the decryption is the browser's own
-  CDM: the hub never touches a key. What it does is make the site's page willing to run
-  for it -- the licence POST through `/ext`, the site's own `Referer`/`Origin` on the
-  way out, and every nested player frame served by `/play` so `X-Frame-Options` and the
-  embedder check never see a foreign parent. On the PC that puts the picture *inside*
-  the app window. On a phone it needs a WebView with a Widevine key system; when there
-  is none, diagnostics say so and the browser chip is the fallback. Channels are open
+- **Game streams are Widevine/PlayReady DRM**, and there are two paths to a picture.
+  *Harvest first:* the phone app (and `harvest.py` on the PC) walks the `Main N` wrapper chain
+  itself -- plain HTTPS GETs, no page JS, so no ad layer ever loads -- until it finds the
+  manifest. When the provider also leaves the clear-key pair in the open next to it
+  (`masterinf = {"kid": "key"}`), the feed is played in our own `<video>` through
+  `org.w3.clearkey` and `/api/clearkey`, which answers the EME challenge with that pair: no
+  license server, no player page, no ads. *Otherwise:* the site's own player page is proxied
+  through `/play` with the site's `Referer`/`Origin`, its licence POST forwarded, its nested
+  frames rehosted -- the picture is then decrypted by the browser's CDM, and the hub never
+  touches a key. On a phone with no Widevine key system nothing can decrypt a real
+  Widevine feed; the app says so and the browser chip is the way out. Channels are open
   HLS and run in our own player.
 - The aggregator HTML is the fragile dependency: if their `ItemList` block changes shape, the
   game list empties â€” visibly, which is the failure mode worth having.
