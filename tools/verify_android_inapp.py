@@ -145,6 +145,43 @@ def main():
         check("app: the fixture's own playback was not interrupted by the ad block",
               not [l for l in dropped if "10.0.2.2" in l], "%d ad hosts blocked" % len(dropped))
 
+        # ------------------------------------------- an ad's window must be dropped
+        def embed_reports():
+            return [r for r in fixture_stream.STATE["report"] if r.get("path") == "/embed/player"]
+
+        before_embed = len(embed_reports())
+        adb("logcat", "-c")
+        adb("shell", "am", "start", "-n", PKG + "/.MainActivity",
+            "--es", "url", BASE + "/adwin")
+        wait(lambda: len(embed_reports()) > before_embed, 45, 1.0)
+        time.sleep(2)
+        logs = logcat()
+        dropped_popup = [l for l in logs.splitlines() if "popup dropped" in l]
+        on_ad_page = [l for l in logs.splitlines()
+                      if "page finished" in l and "ads.example.net" in l]
+        check("ad: an ad's window.open() was dropped", bool(dropped_popup),
+              (dropped_popup[-1].strip() if dropped_popup else "no 'popup dropped' in logcat")[:170])
+        check("ad: the app stayed on the player", not on_ad_page,
+              (on_ad_page[-1].strip() if on_ad_page else "no ads.example.net page load")[:170])
+        check("ad: the player still decoded video while the ad fired",
+              len(embed_reports()) > before_embed,
+              json.dumps((embed_reports()[-1:] or [{}])[0])[:200])
+
+        # --------------------------------- a tap on an ad overlay must not leave the app
+        before_tap = len(embed_reports())
+        adb("logcat", "-c")
+        adb("shell", "am", "start", "-n", PKG + "/.MainActivity",
+            "--es", "url", BASE + "/tapad")
+        wait(lambda: len(embed_reports()) > before_tap, 45, 1.0)
+        adb("shell", "input", "tap", "540", "1200")
+        tap_blocked = wait(lambda: next((l.strip() for l in logcat().splitlines()
+                                         if "nav blocked (not the player)" in l), None), 20, 1.0)
+        stray_tap = [l for l in logcat().splitlines()
+                     if "page finished" in l and "ads.example.net" in l]
+        check("ad: a tap on an ad overlay did not leave the player",
+              bool(tap_blocked) and not stray_tap,
+              (tap_blocked[:150] if tap_blocked else "no 'nav blocked (not the player)' in logcat"))
+
         # ---------------------------------------------------- the ad-hijack shape
         adb("logcat", "-c")
         adb("shell", "am", "start", "-n", PKG + "/.MainActivity",

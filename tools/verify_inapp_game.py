@@ -278,6 +278,23 @@ def main():
                   len(ctx.pages) == before_pages,
                   "%d page target(s) before, %d after" % (before_pages, len(ctx.pages)))
 
+            # ---- an ad's window must not replace the picture -------------------
+            ADWIN = ORIGIN + "/adwin"
+            play3 = "/play?u=" + urllib.parse.quote(ADWIN, safe="") + \
+                    "&r=" + urllib.parse.quote(EVENT, safe="")
+            show(play3)
+            page.wait_for_timeout(7000)
+            src3 = page.evaluate("() => (document.querySelector('#pf') || {}).getAttribute('src') || ''")
+            st3 = frame_state("/embed/player")
+            check("ad: an ad's window.open() did not replace the player",
+                  "/play?u=" in src3 and "ads.example.net" not in src3,
+                  src3[:160])
+            check("ad: the picture kept running through it", moving(st3),
+                  json.dumps((st3 or {}).get("playing") or {}))
+            check("ad: no window was opened for the ad",
+                  len(ctx.pages) == before_pages,
+                  "%d page target(s)" % len(ctx.pages))
+
             errors = [c for c in console
                       if (c.startswith("pageerror") or
                           (c.startswith("error") and "Failed to load resource" not in c))

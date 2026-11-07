@@ -869,15 +869,47 @@ let pfRestores = 0;
   });
 })();
 
-// The site's player may hand its media window to window.open(). A sandboxed
-// frame is not allowed to create one, and a popup would be exactly the "leave
-// the app" behaviour we are removing, so the patch that ships with every
-// proxied page posts the URL here instead: same picture, same frame, no window.
+// The site's player may hand its media window to window.open(). A sandboxed frame
+// cannot create one, so the patch inside every proxied page posts the URL here and
+// the picture goes in the same frame.
+//
+// The gate matters more than the feature: an ad calls window.open() far more often
+// than a player does, and "load whatever asked" is how the whole window ended up on
+// an ad landing page. A popup is only honoured when it names a player: same site as
+// the page being proxied, a host this session has already proxied, or a URL whose
+// path says /main/, /embed, /player, /secure/ or a manifest.
+const AD_HOST_RX = /(doubleclick|googlesyndication|adservice|google-analytics|adsterra|popads|popcash|propellerads|onclicksuper|onclickalgo|clickadu|hilltopads|exoclick|tsyndicate|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid|zedo|profitablerate|adnium|galaksion|adspyglass|ad-maven|adcash|dtscdn|dtscout|mrktmtrcs|trend48|zedo)/i;
+const pfKnownHosts = new Set();
+function hostOf(u){ try { return new URL(u).hostname.toLowerCase(); } catch(e){ return ''; } }
+function regDomain(h){ const p = (h||'').split('.'); return p.length >= 2 ? p.slice(-2).join('.') : (h||''); }
+function playerish(u){ return /\/main\/|\/embed|\/player|\/live|\/watch|\/secure\/|\.m3u8|\.mpd/i.test(u || ''); }
+function pfUpstream(){
+  try {
+    const src = ($('#pf') || {}).getAttribute ? ($('#pf').getAttribute('src') || '') : '';
+    const m = /[?&]u=([^&]+)/.exec(src);
+    return m ? decodeURIComponent(m[1]) : '';
+  } catch(e){ return ''; }
+}
+function popupAllowed(u){
+  if (!u || !/^https?:\/\//i.test(u)) return false;
+  if (AD_HOST_RX.test(u)) return false;
+  const host = hostOf(u);
+  if (!host) return false;
+  const cur = hostOf(pfUpstream() || (lastGame && lastGame.url) || '');
+  if (cur && (host === cur || regDomain(host) === regDomain(cur))) return true;
+  if (pfKnownHosts.has(host)) return true;
+  if (playerish(u)) return true;
+  return false;
+}
 window.addEventListener('message', function(ev){
   const d = ev.data;
   if (!d || typeof d !== 'object' || !d.nba_popup) return;
   const u = String(d.nba_popup);
-  if (!/^https?:\/\//i.test(u)) return;
+  if (!popupAllowed(u)){
+    toast('an ad asked for a window - dropped', 2200);
+    return;
+  }
+  pfKnownHosts.add(hostOf(u));
   if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
   document.body.classList.add('iframeMode');
   $('#pf').style.display = 'block';
@@ -967,6 +999,8 @@ async function watchGame(g){
     if (!(j && j.ok && target)) { toast('no working feed found for this game right now', 4500); setSpin(false); return; }
     if (await drmState(2500) === false)
       toast('this browser has no Widevine key system - the picture will stay black', 6000);
+    pfKnownHosts.add(hostOf(g.url));
+    pfKnownHosts.add(hostOf(target));
     const pf = $('#pf');
     if (hls){ hls.destroy(); hls = null; }
     document.body.classList.remove('playing');

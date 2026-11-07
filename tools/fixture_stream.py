@@ -112,6 +112,28 @@ ADTEST = """<!doctype html><html><head><meta charset="utf-8"><title>adtest</titl
 <script>setTimeout(function () { location.href = 'http://example.com/'; }, 700);</script>
 </body></html>"""
 
+# The same player, plus an ad that asks for a window -- the shape that must NOT be
+# honoured, because an ad calls window.open() far more often than a player does.
+ADWIN = """<!doctype html><html><head><meta charset="utf-8"><title>player with an ad window</title>
+<style>html,body{margin:0;background:#000;height:100%}iframe{position:absolute;inset:0;
+width:100%;height:100%;border:0}</style></head><body>
+<iframe src="/embed/player?n=3" allow="autoplay; fullscreen; encrypted-media"></iframe>
+<script>
+  setTimeout(function () { window.open('http://ads.example.net/landing?slot=1', '_blank'); }, 600);
+  setTimeout(function () { window.open('http://ads.example.net/landing?slot=2', '_blank'); }, 1400);
+</script></body></html>"""
+
+# The player, with an ad wearing the costume of a play button: a full-screen link on
+# top of the picture. A tap must not take the app to that landing page.
+TAPAD = """<!doctype html><html><head><meta charset="utf-8"><title>player with an ad overlay</title>
+<style>html,body{margin:0;background:#000;height:100%}
+iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+a#ad{position:absolute;inset:0;z-index:9;display:block;background:rgba(0,0,0,0.01)}
+a#ad span{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+width:180px;height:180px;border-radius:90px;background:rgba(255,255,255,0.25)}</style></head>
+<body><iframe src="/embed/player?n=4" allow="autoplay; fullscreen; encrypted-media"></iframe>
+<a id="ad" href="http://ads.example.net/landing?tap=1"><span></span></a></body></html>"""
+
 REFUSED = "<html><body>This stream is not available here</body></html>"
 
 
@@ -168,6 +190,10 @@ class H(BaseHTTPRequestHandler):
             return self._html(200, EVENT)
         if path == "/adtest":
             return self._html(200, ADTEST)
+        if path == "/adwin":
+            return self._html(200, ADWIN, {"X-Frame-Options": "SAMEORIGIN"})
+        if path == "/tapad":
+            return self._html(200, TAPAD, {"X-Frame-Options": "SAMEORIGIN"})
         if path in ("/main/1", "/main/2"):
             n = path[-1]
             popup = ""

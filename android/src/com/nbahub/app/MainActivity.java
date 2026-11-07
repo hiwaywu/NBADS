@@ -92,7 +92,45 @@ public class MainActivity extends Activity {
     private boolean isPlayerish(String url) {
         String low = (url == null ? "" : url).toLowerCase();
         return low.contains("/main/") || low.contains("/embed") || low.contains("/player")
-                || low.contains("/live") || low.contains("/watch") || low.contains("/secure/");
+                || low.contains("/live") || low.contains("/watch") || low.contains("/secure/")
+                || low.contains(".m3u8") || low.contains(".mpd");
+    }
+
+    /** a.b.example.com and example.com are the same site; example.com and other.net are not. */
+    private static String regDomain(String host) {
+        if (host == null) return "";
+        String[] p = host.toLowerCase().split("\\.");
+        return p.length >= 2 ? p[p.length - 2] + "." + p[p.length - 1] : host.toLowerCase();
+    }
+
+    private boolean sameSite(String a, String b) {
+        if (a == null || b == null || a.length() == 0 || b.length() == 0) return false;
+        return regDomain(a).equals(regDomain(b));
+    }
+
+    /**
+     * Is this window.open() URL the player's, or an ad's?
+     *
+     * Honouring every popup is how the last build ended up showing nothing but ads:
+     * an ad calls window.open() far more often than a player does. A popup is taken
+     * only when it belongs to the site being played, a host this session has already
+     * loaded, or a URL whose path names a player.
+     */
+    private boolean popupAllowed(String url, String current) {
+        if (url == null || !url.toLowerCase().startsWith("http")) return false;
+        if (isAdHost(url)) return false;
+        String host = "";
+        try { host = Uri.parse(url).getHost(); } catch (Exception e) { }
+        if (host == null || host.length() == 0) return false;
+        host = host.toLowerCase();
+        String curHost = "";
+        try { curHost = Uri.parse(current == null ? "" : current).getHost(); } catch (Exception e) { }
+        if (curHost == null) curHost = "";
+        if (host.equalsIgnoreCase(curHost)) return true;
+        if (sameSite(host, curHost)) return true;
+        if (knownHosts.contains(host)) return true;
+        if (isPlayerish(url)) return true;
+        return false;
     }
 
     private View fullView;
@@ -222,6 +260,13 @@ public class MainActivity extends Activity {
 
         web.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap fav) {
+                // the chip is the way out of a page that will not play: it has to be
+                // there the moment the page starts, not after it finishes loading
+                updateChip();
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 updateChip();
                 // A game tap navigates to the site's own player page. Its poster /
@@ -280,17 +325,19 @@ public class MainActivity extends Activity {
                     if (isHome(url)) return false;
                     // an ad host is an ad host, whoever asks for it
                     if (isAdHost(url)) { Log.i(TAG, "nav blocked (ad host): " + url); return true; }
-                    // The old rule was "same host or nothing", and that is what kept a
-                    // game from playing here: the player page hands the picture to a
-                    // host of its own, the navigation was refused, and the app stayed
-                    // black until the page was opened in a browser. A tap is a tap --
-                    // hasGesture() is the difference between the user pressing play and
-                    // a script dragging the screen to an ad landing page.
-                    if (req.hasGesture()) return false;
+                    // Stay in the app, but only on pages that belong to the player that
+                    // is already running: same host, same site, a host this session has
+                    // talked to, or a URL that names a player.
+                    //
+                    // A gesture is NOT a licence to leave: the overlay an ad puts over
+                    // the picture looks exactly like a play button, so "the user tapped
+                    // it" would walk the app straight onto an ad landing page -- which
+                    // is precisely what went wrong in the last build.
                     if (host.equalsIgnoreCase(curHost)) return false;
+                    if (sameSite(host, curHost)) return false;
                     if (knownHosts.contains(host)) return false;
                     if (isPlayerish(url)) return false;
-                    Log.i(TAG, "nav blocked (no gesture, unknown host): " + url);
+                    Log.i(TAG, "nav blocked (not the player): " + url);
                     return true;
                 }
                 try {
@@ -375,23 +422,26 @@ public class MainActivity extends Activity {
         if (url == null || url.isEmpty()) return;
         String low = url.toLowerCase();
         if (!low.startsWith("http")) return;
-        if (isHome(url)) { destroyPopup(from); return; }
-        if (isAdHost(url)) {
-            Log.i(TAG, "popup ad dropped: " + url);
-            destroyPopup(from);
+        if (isHome(url)) { destroyPopupLater(from); return; }
+        String current = web == null ? "" : web.getUrl();
+        if (!popupAllowed(url, current)) {
+            // an ad's window: drop it, and say so, because "nothing happened" is the
+            // correct outcome and the log is the only place that can show it
+            Log.i(TAG, "popup dropped (not the player): " + url);
+            destroyPopupLater(from);
             return;
         }
         Log.i(TAG, "popup kept in-app: " + url);
-        // Destroying a WebView from inside its own navigation callback can abort the
-        // load the popup was in the middle of (and, on a slow device, take the renderer
-        // with it). Let the callback return first.
-        final WebView dead = from;
-        if (dead != null && dead != web) {
-            dead.postDelayed(new Runnable() {
-                public void run() { destroyPopup(dead); }
-            }, 700);
-        }
+        destroyPopupLater(from);
         if (web != null) web.loadUrl(url);
+    }
+
+    /** Destroying a WebView from inside its own navigation callback aborts the load. */
+    private void destroyPopupLater(final WebView pop) {
+        if (pop == null || pop == web) return;
+        pop.postDelayed(new Runnable() {
+            public void run() { destroyPopup(pop); }
+        }, 700);
     }
 
     private void destroyPopup(WebView pop) {
@@ -526,7 +576,9 @@ public class MainActivity extends Activity {
     private void updateChip() {
         if (chip == null || web == null) return;
         String cur = web.getUrl();
-        boolean away = cur != null && cur.startsWith("http") && !isHome(cur);
+        // visible on every page that is not the hub itself -- including a page an ad
+        // dragged us onto, where it is the only way back
+        boolean away = cur == null || !cur.startsWith("http") || !isHome(cur);
         chip.setVisibility(away ? View.VISIBLE : View.GONE);
         if (chromeChip != null) chromeChip.setVisibility(away ? View.VISIBLE : View.GONE);
     }
