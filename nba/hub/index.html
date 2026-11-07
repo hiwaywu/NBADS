@@ -396,10 +396,11 @@ function render(){
   gs.forEach(g => {
     const live = g.state === 'in';
     const done = g.state === 'post';
-    const handoff = IS_MOBILE && !STANDALONE;   // a phone browser tab: games go to the site
+    const handoff = IS_MOBILE;   // phone: games play in a real browser (the app hands them to Firefox)
+    const browserName = (STANDALONE && window.Hub && Hub.browser) ? Hub.browser() : 'browser';
     let meta, badge, cls;
     if (done) { meta = (g.time ? g.time + ' - ' : '') + 'final'; badge = 'final'; cls = ''; }
-    else if (live) { meta = 'live now' + (handoff ? ' \u00b7 opens in browser' : ''); badge = 'live'; cls = 'live'; }
+    else if (live) { meta = 'live now' + (handoff ? ' \u00b7 opens in ' + browserName : ''); badge = 'live'; cls = 'live'; }
     else if (g.stream === false) { meta = (g.time ? g.time + ' - ' : '') + 'no stream listed yet'; badge = 'none'; cls = ''; }
     else { meta = (g.time ? g.time + ' - ' : '') + 'has a feed (opens at tip-off)'; badge = 'watch'; cls = ''; }
     list.appendChild(row(document.createElement('div'), {
@@ -931,6 +932,21 @@ async function watchGame(g){
     hideUnmute();
     // Widevine cannot be decrypted by a webview without EME; Chrome on the same
     // phone can. Hand the link over instead of showing a black rectangle.
+    // Tested on a Fold 7: the player inside the app's WebView plays about a
+    // second and then stalls, whether in the box or full page; in Firefox (with
+    // uBlock) it plays. So the app hands games straight to Firefox -- Hub picks
+    // Firefox, then Brave, then Chrome. The in-app game view stays in the code
+    // (Hub.openGame) but is not used.
+    if (STANDALONE && Hub.openExternal){
+      if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
+      try { v.pause(); } catch(e){}
+      lastChannel = null;
+      const name = Hub.browser ? Hub.browser() : 'your browser';
+      toast('opening the game in ' + name, 2600);
+      $('#nowTitle').textContent = g.name + '  \u2014  in ' + name;
+      Hub.openExternal(target);
+      return;
+    }
     if (STANDALONE && Hub.openGame){
       if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
       try { v.pause(); } catch(e){}
