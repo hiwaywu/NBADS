@@ -29,3 +29,6 @@ pc/*.exe
 
 # apk build output (the shipped copy is releases/NBAHub.apk)
 android/NBAHub.apk
+
+# portable bundle build output
+build-portable/
