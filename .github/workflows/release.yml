@@ -1,0 +1,46 @@
+name: release
+
+# Push a version tag and this publishes its GitHub Release:
+#
+#   git tag -a v2.11 -m "v2.11 - <title>" -m "<notes>"  &&  git push origin v2.11
+#
+#   - NBAHub.apk           releases/NBAHub.apk at the tagged commit
+#   - NBAHub.exe,          carried over from the previous release: both are built
+#     NBAHub-portable.zip  on Windows only, so attach new ones by hand when they change
+#   - title = first line of the tag message, notes = the rest
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          title=$(git tag -l --format='%(contents:subject)' "$TAG")
+          git tag -l --format='%(contents:body)' "$TAG" > notes.md
+          [ -n "$title" ] || title="$TAG"
+
+          mkdir carry
+          prev=$(gh release view --json tagName -q .tagName 2>/dev/null || true)
+          if [ -n "$prev" ] && [ "$prev" != "$TAG" ]; then
+            gh release download "$prev" --dir carry --pattern NBAHub.exe --pattern NBAHub-portable.zip || true
+          fi
+          shopt -s nullglob
+          carried=(carry/*)
+          echo "carried over from ${prev:-nothing}: ${carried[*]:-none}"
+
+          gh release create "$TAG" releases/NBAHub.apk "${carried[@]}" \
+            --verify-tag --title "$title" --notes-file notes.md
