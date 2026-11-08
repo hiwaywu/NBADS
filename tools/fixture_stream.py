@@ -158,6 +158,24 @@ WRAP2 = """<!doctype html><html><head><meta charset="utf-8"><title>wrap 2</title
 </script></body></html>"""
 
 
+# ---- a chain that names a REAL manifest -------------------------------------
+# Same shape, but the last wrapper names a live NFL channel instead of the local
+# test playlist, so the app's own harvest -> relay -> decoder can be followed all
+# the way to a moving picture on a device.
+REAL_MANIFEST = "https://tvsen6.aynaott.com/nfl/index.m3u8"   # 480p: an emulator survives it
+
+CHAIN2 = """<!doctype html><html><head><meta charset="utf-8"><title>chain event 2</title></head>
+<body><h1>chain event 2 - real manifest</h1><a href="__MAIN8__">Main 8</a></body></html>"""
+
+WRAP_REAL = """<!doctype html><html><head><meta charset="utf-8"><title>wrap real</title></head>
+<body><p>one wrapper, then the real thing</p>
+<iframe src="/wrap3" allow="autoplay; fullscreen; encrypted-media"></iframe></body></html>"""
+
+REAL_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>wrap 3</title></head>
+<body><p>names a live channel</p>
+<script>var globalurl = "__MANIFEST__";</script></body></html>"""
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "fixture-stream/1.0"
@@ -211,6 +229,12 @@ class H(BaseHTTPRequestHandler):
             return self._html(200, EVENT)
         if path == "/adtest":
             return self._html(200, ADTEST)
+        if path == "/chain2":
+            return self._html(200, CHAIN2.replace("__MAIN8__", self.origin + "/main/8"))
+        if path == "/main/8":
+            return self._html(200, WRAP_REAL)
+        if path == "/wrap3":
+            return self._html(200, REAL_PAGE.replace("__MANIFEST__", REAL_MANIFEST))
         if path == "/chain":
             return self._html(200, CHAIN.replace("__MAIN7__", self.origin + "/main/7"))
         if path == "/main/7":
