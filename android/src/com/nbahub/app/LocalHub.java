@@ -961,7 +961,8 @@ final class LocalHub {
             }
             au.lastHit = System.currentTimeMillis();
             if (sub.equals("a.m3u8")) {
-                String pl = au.playlist();
+                // starts at the same moment as live.m3u8: see Relay.playlist(Relay)
+                String pl = au.playlist(rl);
                 if (pl == null) {
                     send(out, r, 503, "application/vnd.apple.mpegurl",
                             bytes("#EXTM3U\n#EXT-X-TARGETDURATION:2\n"), null);
@@ -998,7 +999,9 @@ final class LocalHub {
         }
         if (sub.equals("live.m3u8") || sub.equals("index.m3u8")) {
             rl.plHits++;
-            String pl = rl.playlist();
+            // with a separate audio relay, both playlists start at the same moment
+            // of the game, or the sound plays whole segments off the picture
+            String pl = rl.playlist(relayAudio);
             if (pl == null) {
                 send(out, r, 503, "application/vnd.apple.mpegurl", bytes("#EXTM3U\n#EXT-X-TARGETDURATION:2\n"), null);
                 return;

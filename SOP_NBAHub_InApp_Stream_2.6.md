@@ -282,7 +282,7 @@ shaka  →  http://127.0.0.1:8790/relay/master.m3u8  →  /relay/live.m3u8 (+ /r
 
 ---
 
-## 6. Sound: two independent causes
+## 6. Sound: two independent causes, and a third that only shows once there is sound
 
 ### 6.1 Cause A — our own mute
 
@@ -334,6 +334,27 @@ aBytes: 0 → 395 752 → 680 681 → 935 061   (12 s later, ≈21 KB/s AAC)
 relay audio note: "separate audio rendition (mp4a.40.5-134826-48000-2) - relayed"
 /relay/master.m3u8 = 200   /relay/a.m3u8 = 200
 ```
+
+### 6.3 Cause C — the sound plays a segment off the picture (2.10)
+
+Reported once sound worked: "the audio doesn't match the video, one is delayed." The two relays
+from 6.2 join the live edge **independently** (each keeps the newest five segments of its own first
+poll), and shaka 4.7 (HLS, sequence mode) places each playlist by itself: by `PROGRAM-DATE-TIME` if
+present, otherwise **each playlist's first segment is time 0**. The relay did not pass the
+date-time on, so whenever upstream moved between the two joins, video segment N and audio segment
+N+1 both started at 0 — a whole segment (6 s) of offset for the rest of the game. Timing decides,
+so it comes and goes.
+
+Fix: `Relay.playlist(Relay partner)` serves both halves from the **same moment of the game** —
+matched by upstream `PROGRAM-DATE-TIME` when both carry it, else by media sequence — and neither
+until both have joined. `/api/relaystats` → `av_align` says which. The date-time is deliberately
+**not** forwarded to shaka: with it, shaka 4.7 sets the live edge from *device clock − date-time*,
+and a feed stamped off the phone's clock never starts (measured: seek range at 4922 s, no
+segments in it).
+
+Proof without a live game: `python tools/av_sync/av_sync_check.py` (the app's `Relay.java` on a
+desktop JVM, real fMP4 with separate audio, bundled shaka in Chromium) — the 2.9 relay passed 2/6
+(the rest off by 2018 ms, one fixture segment), this relay 6/6 at 13–18 ms.
 
 ---
 
@@ -390,6 +411,7 @@ player iframe before tip-off, and that is not an error worth an ad-wall.
 | relay stats | `curl 127.0.0.1:18790/api/relaystats` | `ready:true`, `variant 1920x1080`, `audio:"…relayed"` |
 | picture | CDP: `v.videoWidth`, `v.currentTime` twice 20 s apart | `1920`, and `t` advances by ≈20 |
 | sound | CDP: `v.webkitAudioDecodedByteCount` twice | grows ≈21 KB/s |
+| sound in sync | `curl 127.0.0.1:18790/api/relaystats` during a game; `python tools/av_sync/av_sync_check.py` | `av_align: "lined up by …"`; 6/6 within 50 ms |
 | mute state | CDP: click `#snd` twice | `false→true→false`, label `sound on`/`muted` |
 
 CDP probe (no Playwright; the app enables WebView debugging):
@@ -420,6 +442,8 @@ powershell -File tools\devtools_eval.ps1 -ExpressionFile tools\state.js
 6. **`mirrorFail` is not a general queue.** It is the *channel* queue; a game needs its own links (7.1).
 7. **`javac` writes notes to stderr** and the wrapper reports exit 1 even on success — look for `OK ->`.
 8. **Base64 in a page is not an ID.** `gblog.asia/cs/UG9ydGxhbmQ…` decodes to the matchup *name* (2.1).
+9. **Two relays are two clocks.** Picture and sound relayed separately must start their playlists at
+   the same moment, or shaka puts different moments at time 0 — whole segments of A/V offset (6.3).
 
 ---
 
@@ -445,7 +469,8 @@ powershell -File tools\devtools_eval.ps1 -ExpressionFile tools\state.js
 2. Build the chain walker with **frame ranking** and a visited set; log every hop.
 3. Try the manifest with and without `&sessionId=<guid>`; watch for 400.
 4. Read the player's JS for `masterinf` / `clearKeys`; if present, plan on **shaka**, not hls.js.
-5. Put the relay in front (same-origin, DVR) and serve a **master that names the audio rendition**.
+5. Put the relay in front (same-origin, DVR) and serve a **master that names the audio rendition**,
+   with both playlists starting at the same moment of the programme.
 6. Measure `webkitAudioDecodedByteCount` before claiming sound.
 7. Make failure a card, and give games their own failover queue.
 8. Verify with numbers (Section 8), not with screenshots.

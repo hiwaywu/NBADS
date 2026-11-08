@@ -317,6 +317,15 @@ silent -- League Pass keeps audio in a **separate rendition**, so the relay now 
 for that playlist and serves a synthesised `/relay/master.m3u8` naming both. Measured on a live
 game: `webkitAudioDecodedByteCount` 0 -> 935 061 B over ~30 s, video 1920x1080 advancing in real time.
 
+**2.10: the sound lines up with the picture.** Two relays join the live edge independently, and
+shaka puts the first segment of each playlist at time 0 -- so whenever the two joined at different
+segments, the sound ran a whole segment (6 s on League Pass) ahead of or behind the picture. Both
+playlists now start at the same moment of the game: matched by the feed's own
+`PROGRAM-DATE-TIME` when it has one, else by media sequence, and neither is served until both have
+joined (`Relay.playlist(Relay)`; `/api/relaystats` -> `av_align` says how). Checked without a game:
+`python tools/av_sync/av_sync_check.py` -- the 2.9 relay fails 4/6 at 2018 ms, this one passes 6/6 at
+13-18 ms.
+
 A feed that dies no longer launders into the NBA TV channel list (the reported "it walks down the
 list until it hits NBA TV"): game failover hops the game's own links, and when nothing resolves the
 app shows a card with **retry** / **player page** instead of dropping the user into the ad-filled site.

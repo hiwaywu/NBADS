@@ -9,14 +9,18 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.net.URLEncoder;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TimeZone;
 import java.util.TreeSet;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutorCompletionService;
@@ -38,10 +42,13 @@ import java.util.regex.Pattern;
  *  (d) a disk tier in the app cache keeps what scrolls out of RAM (pause and
  *      rewind work without racing the source); wiped when the relay stops
  *
- * Two things the Python relay dropped and this one keeps:
+ * Things the Python relay dropped and this one keeps:
  *  - #EXT-X-DISCONTINUITY (ad splices): without it the player tries to join
  *    two unrelated timelines and the picture freezes or jumps
  *  - #EXT-X-KEY (AES-128): served through key?u=... so CORS cannot block it
+ *
+ * When the sound is its own playlist it has its own relay, and the two must
+ * start their playlists at the same moment of the game -- see playlist(Relay).
  *
  * Served by LocalHub under /relay/: live.m3u8, seg/N.ts, init.mp4, key, stats,
  * health, window, source.
@@ -67,6 +74,7 @@ final class Relay {
     private final Map<Long, String> keys = new HashMap<Long, String>();     // seq -> rewritten KEY line
     private final Set<Long> discs = new HashSet<Long>();                     // seq starts a new timeline
     private final Map<Long, Long> dseq = new HashMap<Long, Long>();          // seq -> discontinuity number
+    private final Map<Long, Double> pdts = new HashMap<Long, Double>();      // seq -> wall clock, epoch ms
     private final Map<String, byte[]> keyCache = Collections.synchronizedMap(new HashMap<String, byte[]>());
 
     private volatile byte[] mapData;
@@ -76,7 +84,11 @@ final class Relay {
     private volatile String prefix = "";
     /** The variant's separate audio playlist, when the master declares one.
      *  Without it a picture plays silent: the video variant carries no audio. */
-    private volatile String audioUrl;    private volatile double target = 6.0;
+    private volatile String audioUrl;
+    private volatile double target = 6.0;
+    /** When this relay was made: how long a partner relay waits for it (playlist(Relay)). */
+    private final long born = System.currentTimeMillis();
+    private volatile String alignNote = "";
     private volatile boolean ready = false;
     private volatile boolean stopped = false;
     private long floor = -1;                     // never fetch behind where we joined
@@ -132,6 +144,32 @@ final class Relay {
             out.put(m.group(1), v);
         }
         return out;
+    }
+
+    static final String PDT_TAG = "#EXT-X-PROGRAM-DATE-TIME:";
+
+    // java.time is API 26; the app runs on 24+
+    private static final Pattern ISO = Pattern.compile(
+            "(\\d{4})-(\\d{2})-(\\d{2})[Tt ](\\d{2}):(\\d{2}):(\\d{2})(?:[.,](\\d+))?\\s*(Z|z|[+-]\\d{2}(?::?\\d{2})?)?");
+
+    /** ISO-8601 date-time -> epoch ms (no zone = UTC), NaN when unreadable. */
+    static double parsePdt(String s) {
+        Matcher m = ISO.matcher(s.trim());
+        if (!m.lookingAt()) return Double.NaN;
+        Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"), Locale.US);
+        c.clear();
+        c.set(Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)) - 1, Integer.parseInt(m.group(3)),
+                Integer.parseInt(m.group(4)), Integer.parseInt(m.group(5)), Integer.parseInt(m.group(6)));
+        double ms = c.getTimeInMillis();
+        if (m.group(7) != null) ms += Double.parseDouble("0." + m.group(7)) * 1000.0;
+        String z = m.group(8);
+        if (z != null && !z.equalsIgnoreCase("Z")) {
+            String d = z.substring(1).replace(":", "");
+            int off = Integer.parseInt(d.substring(0, 2)) * 60
+                    + (d.length() >= 4 ? Integer.parseInt(d.substring(2, 4)) : 0);
+            ms -= (z.charAt(0) == '-' ? -off : off) * 60000.0;
+        }
+        return ms;
     }
 
     /** Master -> best rendition (height, then bandwidth). */
@@ -243,12 +281,17 @@ final class Relay {
                 String curKey = null;
                 boolean pendingDisc = false;
                 Double pendingDur = null;
+                // the wall clock of the next segment: from its own tag, else carried
+                // forward from the last tagged one (many packagers tag only the
+                // first segment of the window, and we join the window further in)
+                double pendingPdt = Double.NaN, clock = Double.NaN;
                 boolean endlist = txt.contains("#EXT-X-ENDLIST");
                 List<Long> newSeqs = new ArrayList<Long>();
                 Map<Long, String> nu = new HashMap<Long, String>();
                 Map<Long, Double> nd = new HashMap<Long, Double>();
                 Map<Long, String> nk = new HashMap<Long, String>();
                 Map<Long, Long> nds = new HashMap<Long, Long>();
+                Map<Long, Double> npdt = new HashMap<Long, Double>();
                 Set<Long> ndisc = new HashSet<Long>();
                 long idx = 0;
                 for (String raw : lines) {
@@ -266,6 +309,8 @@ final class Relay {
                         curKey = rewriteKey(l, base);
                     } else if (l.equals("#EXT-X-DISCONTINUITY")) {
                         pendingDisc = true;
+                    } else if (l.startsWith(PDT_TAG)) {
+                        pendingPdt = parsePdt(l.substring(PDT_TAG.length()));
                     } else if (l.startsWith("#EXTINF:")) {
                         try {
                             String d = l.substring(8);
@@ -278,13 +323,19 @@ final class Relay {
                         long seq = mseq + idx;
                         idx++;
                         if (pendingDisc) { dsn++; ndisc.add(seq); }
+                        double dur = pendingDur != null ? pendingDur : tgt;
                         nu.put(seq, Http.join(base, l));
-                        nd.put(seq, pendingDur != null ? pendingDur : tgt);
+                        nd.put(seq, dur);
                         nds.put(seq, dsn);
                         if (curKey != null) nk.put(seq, curKey);
+                        // a discontinuity without its own tag starts a clock we do not know
+                        double at = !Double.isNaN(pendingPdt) ? pendingPdt : (pendingDisc ? Double.NaN : clock);
+                        if (!Double.isNaN(at)) npdt.put(seq, at);
+                        clock = Double.isNaN(at) ? Double.NaN : at + dur * 1000.0;
                         newSeqs.add(seq);
                         pendingDisc = false;
                         pendingDur = null;
+                        pendingPdt = Double.NaN;
                     }
                 }
                 target = Math.max(1.0, tgt);
@@ -305,6 +356,9 @@ final class Relay {
                             if (nk.containsKey(s)) keys.put(s, nk.get(s));
                             if (ndisc.contains(s)) discs.add(s);
                         }
+                        // first value wins: a segment's clock must not move under
+                        // a player that has already placed it
+                        if (!pdts.containsKey(s) && npdt.containsKey(s)) pdts.put(s, npdt.get(s));
                         if (s >= floor && !segs.containsKey(s) && !disk.containsKey(s)) missing.add(s);
                     }
                 }
@@ -405,6 +459,7 @@ final class Relay {
                 keys.remove(s);
                 discs.remove(s);
                 dseq.remove(s);
+                pdts.remove(s);
             }
         }
     }
@@ -474,6 +529,7 @@ final class Relay {
         keys.remove(seq);
         discs.remove(seq);
         dseq.remove(seq);
+        pdts.remove(seq);
     }
 
     private void dropOldestDisk() {
@@ -531,10 +587,101 @@ final class Relay {
         return j;
     }
 
-    synchronized String playlist() {
+    /** How long one half of a picture+sound pair holds its playlist back for the other. */
+    private static final long PARTNER_WAIT_MS = 20000;
+
+    String playlist() { return playlistFrom(-1); }
+
+    /**
+     * This relay's playlist when a second relay carries the other half of the
+     * same programme (the video variant and its separate audio rendition).
+     *
+     * shaka (4.7, HLS sequence mode) places each playlist on the timeline by
+     * itself: with no PROGRAM-DATE-TIME in them -- and the relay sends none --
+     * the first segment of each playlist is time 0. The two relays join the live
+     * edge independently, so their first segments differ whenever upstream moved
+     * between the two joins, and the sound then ran a whole segment (6 s on
+     * League Pass) ahead of or behind the picture.
+     *
+     * So both halves start at the same moment of the game: the segment whose
+     * upstream date-time matches the other half's, when both feeds carry one,
+     * else the same media sequence. Neither half is served until both have
+     * their window.
+     *
+     * The date-time is not passed on to the player: with it, shaka 4.7 puts the
+     * live edge at (device clock - date-time), and a feed whose clock is off
+     * from the phone's -- a re-stream with the broadcast's own stamps, a phone
+     * with the wrong time -- then has nothing in its seek window and never starts.
+     */
+    String playlist(Relay partner) {
+        if (partner == null || partner.isStopped()) return playlistFrom(-1);
+        long[] mine = span();
+        if (mine == null) return null;
+        long[] theirs = partner.span();
+        if (theirs == null) {
+            // the other half is still joining: a playlist now would start this
+            // half earlier than that one. Give up waiting eventually -- a picture
+            // without sound beats no picture
+            if (System.currentTimeMillis() - partner.born < PARTNER_WAIT_MS) return null;
+            alignNote = "served alone: the other half never joined";
+            return playlistFrom(-1);
+        }
+        long from = -1;
+        double a = clockOf(mine[0]), b = partner.clockOf(theirs[0]);
+        if (!Double.isNaN(a) && !Double.isNaN(b)) {
+            // the later of the two first segments, found in this half by its clock
+            from = seqAtClock(Math.max(a, b));
+            if (from >= 0) alignNote = "lined up by date-time at seq " + from;
+        }
+        if (from < 0) {
+            from = Math.max(mine[0], theirs[0]);
+            // windows that do not overlap number their segments differently
+            if (from > mine[1] || from > theirs[1]) {
+                from = -1;
+                alignNote = "NOT lined up: no date-time and the sequences differ ("
+                        + mine[0] + ".." + mine[1] + " vs " + theirs[0] + ".." + theirs[1] + ")";
+            } else {
+                alignNote = "lined up by media sequence at " + from;
+            }
+        }
+        return playlistFrom(from);
+    }
+
+    /** Upstream date-time of segment seq (epoch ms), NaN when upstream never said. */
+    synchronized double clockOf(long seq) {
+        Double t = pdts.get(seq);
+        return t == null ? Double.NaN : t;
+    }
+
+    /** The held segment that starts nearest wall-clock t, within half a segment; -1 if none. */
+    private synchronized long seqAtClock(double t) {
+        long best = -1;
+        double bestGap = target * 500.0;
+        TreeSet<Long> held = new TreeSet<Long>(segs.keySet());
+        held.addAll(disk.keySet());
+        for (Long s : held) {
+            Double c = pdts.get(s);
+            if (c == null) continue;
+            double gap = Math.abs(c - t);
+            if (gap < bestGap) { bestGap = gap; best = s; }
+        }
+        return best;
+    }
+
+    /** First and last media sequence this relay can serve, or null while it is joining. */
+    synchronized long[] span() {
         if (!ready) return null;
         TreeSet<Long> all = new TreeSet<Long>(segs.keySet());
         all.addAll(disk.keySet());
+        if (all.isEmpty()) return null;
+        return new long[]{all.first(), all.last()};
+    }
+
+    synchronized String playlistFrom(long from) {
+        if (!ready) return null;
+        TreeSet<Long> held = new TreeSet<Long>(segs.keySet());
+        held.addAll(disk.keySet());
+        SortedSet<Long> all = from >= 0 ? held.tailSet(from) : held;
         if (all.isEmpty()) return null;
         long first = all.first();
         double mx = 0;
@@ -595,6 +742,10 @@ final class Relay {
         j.put("source", source);
         j.put("resolved", url);
         j.put("audio", audioNote);
+        // a feed with separate sound: whether upstream stamps its segments, and
+        // how this half was lined up with the other one (playlist(Relay))
+        j.put("program_date_time", !pdts.isEmpty());
+        j.put("av_align", alignNote);
         j.put("discontinuities", discs.size());
         j.put("last_error", lastError);
         j.put("requests", hits);

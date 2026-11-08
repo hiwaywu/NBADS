@@ -1,0 +1,38 @@
+<!doctype html><html><head><meta charset="utf-8"><title>av sync</title>
+<script src="/shaka.js"></script></head><body>
+<video id="v" muted autoplay playsinline width="640" height="360"></video>
+<script>
+// attachShaka() in nba/hub/index.html, minus the clear keys (the fixture is not encrypted)
+window.loaded = null;
+const v = document.getElementById('v');
+shaka.polyfill.installAll();
+const player = new shaka.Player(v);
+player.configure({
+  streaming: { lowLatencyMode: false, bufferingGoal: 40, rebufferingGoal: 2 },
+  manifest: { retryParameters: { timeout: 20000, maxAttempts: 10, backoffFactor: 1.4 } }
+});
+player.load('/relay/master.m3u8')
+  .then(() => { window.loaded = 'ok'; v.play().catch(() => {}); })
+  .catch(e => { window.loaded = 'error ' + (e && (e.code || e.message)); });
+
+// For each relayed segment: where shaka put it on the presentation timeline,
+// keyed by the media sequence in its URL (seg/N.m4s, a/seg/N.m4s).
+window.placement = function(){
+  const m = player.getManifest();
+  if (!m || !m.variants.length) return null;
+  const va = m.variants[0];
+  const idx = (s) => {
+    const o = {};
+    if (!s || !s.segmentIndex) return o;
+    // positions are small ints; get() is exported, the iterator wants a segment at t=0
+    for (let i = 0; i < 5000; i++){
+      const r = s.segmentIndex.get(i);
+      if (!r) continue;
+      const k = /seg\/(\d+)\./.exec(r.getUris()[0]);
+      if (k) o[k[1]] = r.startTime;
+    }
+    return o;
+  };
+  return { video: idx(va.video), audio: idx(va.audio), t: v.currentTime };
+};
+</script></body></html>

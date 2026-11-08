@@ -732,3 +732,55 @@ Two details that made this less obvious than it looks:
 Measured: `python tools/verify_inapp_game.py` **29/29**, including the fade, the wake-through-frame
 and the restore on exit; `python tools/verify_android_inapp.py` **14/14** on the emulator, and the
 APK's `assets/index.html` is byte-identical to the repo page (sha256 compared at build time).
+
+---
+
+## 2.10 -- the sound lines up with the picture
+
+Reported: "the audio doesn't match the video, one is delayed." Phone, League Pass game, shaka path.
+
+League Pass keeps the sound in its own playlist, so `LocalHub.startRelay` runs **two relays** --
+the video variant, then the audio rendition -- and shaka plays `/relay/master.m3u8` naming both.
+Each relay joins the live edge on its own first poll and keeps the newest five segments. shaka 4.7
+(HLS, sequence mode) places each playlist on the timeline by itself: by `PROGRAM-DATE-TIME` when the
+playlists carry it, otherwise **the first segment of each playlist is time 0**. The relay never
+passed the date-time on, so whenever upstream published a segment between the two joins -- the
+audio relay starts one resolve later, and packagers update the two playlists at different moments
+-- video segment N and audio segment N+1 both sat at 0: the sound a whole segment (**6 s** on League
+Pass) off the picture, for the rest of the game. Whether it happens depends on timing, so it comes
+and goes from game to game.
+
+Fix (`Relay.playlist(Relay)`, called by `LocalHub` for `live.m3u8` and `a.m3u8`):
+
+- both playlists start at the **same moment of the game**: the segment whose upstream
+  `PROGRAM-DATE-TIME` matches the other half's, when both carry one (the relay now reads the tag,
+  and carries the clock forward from a tagged segment for packagers that stamp only the first one);
+  else the same media sequence;
+- neither half is served (503, which shaka retries) until **both** have joined -- otherwise the
+  first-loaded half starts earlier than the other. After 20 s the video is served alone;
+- the date-time is still **not** passed on to the player. Tried, measured, rejected: with it,
+  shaka 4.7 puts the live edge at *device clock - date-time*, and a feed whose stamps are off from
+  the phone's clock never starts (fixture stamped 80 min in the past: seek range at 4922 s, no
+  segments in it, `currentTime` stuck at 0).
+- `/api/relaystats` gains `program_date_time` and `av_align` (`lined up by date-time at seq …` /
+  `by media sequence at …` / `NOT lined up …`). Read it before debugging sound again.
+
+Measured with `python tools/av_sync/av_sync_check.py`: the app's own `Relay.java` on a desktop
+JVM, a live fixture made from real ffmpeg fMP4 with separate audio, played by the bundled shaka in
+Chromium; error = where shaka put audio N vs video N, minus where they truly belong.
+
+```text
+                                              2.9 relay        this relay
+audio relay joins 2.5 s late, stamped         FAIL 2018 ms     PASS 18 ms
+audio playlist published 1 s early            PASS*  13 ms     PASS 13 ms
+only the first segment stamped                FAIL 2018 ms     PASS 18 ms
+no PROGRAM-DATE-TIME at all                   FAIL 2018 ms     PASS 18 ms
+no PROGRAM-DATE-TIME, audio 1 s early         PASS*  13 ms     PASS 13 ms
+audio numbered 1000 apart, stamped            FAIL 2018 ms     PASS 18 ms
+* timing-dependent passes: on an earlier run the first of these two failed at 2018 ms
+```
+
+2018 ms is one 2 s fixture segment; the 13-18 ms left is AAC framing (21 ms frames). All app
+sources compile with `-source 8 -target 8` against `android-35/android.jar`. Not yet run: the
+release APK on a live game -- rebuild with `android\build.ps1` (the signing key lives only on the
+build PC) and check `av_align` in `/api/relaystats` during a game.
