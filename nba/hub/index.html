@@ -683,6 +683,31 @@ let shakaReady = typeof shaka !== 'undefined';
 // game feed to NBA TV happened exactly here
 let gameNow = null;
 
+// Taking a player off the <video> element. hls.js lets go at once; shaka's
+// destroy() is asynchronous, and its cleanup (src removed, MediaKeys cleared)
+// lands whenever it lands. A player started on the same element before that
+// was torn down by the old one's cleanup and never played: the second game
+// after the app started stayed black, the third played, the fourth did not
+// (measured with the real page against two relayed fixture games). So every
+// new player waits for playerGone, and attachGen retires a start that a newer
+// tap has overtaken -- its late load() result must not touch the screen.
+let playerGone = Promise.resolve();
+let attachGen = 0;
+function dropPlayers(){
+  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+  if (shakaPlayer){
+    const old = shakaPlayer;
+    shakaPlayer = null;
+    let d;
+    try { d = old.destroy(); } catch(e){ d = null; }
+    playerGone = Promise.all([playerGone, Promise.resolve(d).catch(() => {})]).then(() => {});
+  }
+  return playerGone;
+}
+// leaving our player for a player page or frame: nothing keeps playing behind
+// it, and a start still waiting for playerGone is called off
+function stopPlayers(){ attachGen++; return dropPlayers(); }
+
 function attachShaka(url, keys){
   const _pf = $('#pf'); if (_pf) { _pf.style.display = 'none'; _pf.removeAttribute('src'); }
   if (pol.timer) { clearInterval(pol.timer); pol.timer = null; pol.game = null; }
@@ -692,12 +717,13 @@ function attachShaka(url, keys){
   document.body.classList.add('playing');
   relayBase = url.replace(/\/live\.m3u8.*$/, '');
   attachAt = Date.now();
-  // drop the hls.js instance: the relay is one stream, the player one at a time
-  if (hls){ hls.destroy(); hls = null; }
-  if (shakaPlayer){ try { shakaPlayer.destroy(); } catch(e){} shakaPlayer = null; }
-  v.removeAttribute('src');
+  // the relay is one stream, the player one at a time -- and the new one only
+  // once the old one has let go of the element (dropPlayers)
+  const gen = ++attachGen;
+  const gone = dropPlayers();
   setSpin(true, 'starting the game feed (shaka + clearkey)...');
   const boot = () => {
+    if (gen !== attachGen) return;                 // a newer tap took over
     if (typeof shaka === 'undefined'){ toast('shaka player did not load - falling back to hls', 3000); setTimeout(() => attach(url, keys), 100); return; }
     shaka.polyfill.installAll();
     if (!shaka.Player.isBrowserSupported()){
@@ -705,7 +731,9 @@ function attachShaka(url, keys){
       setTimeout(() => attach(url, keys), 200);
       return;
     }
-    shakaPlayer = new shaka.Player(v);
+    v.removeAttribute('src');
+    const player = new shaka.Player(v);
+    shakaPlayer = player;
     const cfg = {};
     if (keys && typeof keys === 'object' && Object.keys(keys).length){
       // exactly what the provider's own page does for these feeds: local
@@ -714,8 +742,9 @@ function attachShaka(url, keys){
     }
     cfg.streaming = { lowLatencyMode: false, bufferingGoal: 40, rebufferingGoal: 2 };
     cfg.manifest = { retryParameters: { timeout: 20000, maxAttempts: 10, backoffFactor: 1.4 } };
-    shakaPlayer.configure(cfg);
-    shakaPlayer.load(url).then(() => {
+    player.configure(cfg);
+    player.load(url).then(() => {
+      if (gen !== attachGen) return;
       $('#idle').style.display = 'none';
       document.body.classList.add('playing');
       setSpin(false);
@@ -727,6 +756,9 @@ function attachShaka(url, keys){
       if (p && p.catch) p.catch(function(){ showUnmute(); });
       soundState();
     }).catch(err => {
+      // a superseded start reports LOAD_INTERRUPTED (7000) when it is torn down;
+      // that is the switch working, not this game failing over
+      if (gen !== attachGen) return;
       const why = (err && (err.message || err.code)) || 'unknown';
       console.log('shaka load failed: ' + why);
       toast('game feed error: ' + why, 4200);
@@ -749,7 +781,8 @@ function attachShaka(url, keys){
   };
   // shaka-player is deferred; wait for it before the first use
   const wait = () => {
-    if (typeof shaka !== 'undefined') boot(); else setTimeout(wait, 200);
+    if (gen !== attachGen) return;
+    if (typeof shaka !== 'undefined') gone.then(boot); else setTimeout(wait, 200);
   };
   wait();
 }
@@ -762,10 +795,14 @@ function attach(url, keys){
   document.body.classList.add('playing');
   relayBase = url.replace(/\/live\.m3u8.*$/, '');
   attachAt = Date.now();
-  if (hls){ hls.destroy(); hls = null; }
-  if (shakaPlayer){ try { shakaPlayer.destroy(); } catch(e){} shakaPlayer = null; }
-  v.removeAttribute('src');
+  // after a game, shaka may still be letting go of the element (dropPlayers)
+  const gen = ++attachGen;
+  const gone = dropPlayers();
   setSpin(true, 'starting the stream...');
+  gone.then(() => { if (gen === attachGen) attachHls(url, keys); });
+}
+function attachHls(url, keys){
+  v.removeAttribute('src');
   if (window.Hls && Hls.isSupported()){
     const cfg = hlsConfig();
     if (keys && typeof keys === 'object' && Object.keys(keys).length){
@@ -1261,7 +1298,7 @@ window.addEventListener('message', function(ev){
     return;
   }
   pfKnownHosts.add(hostOf(u));
-  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+  stopPlayers();
   document.body.classList.add('iframeMode');
   $('#pf').style.display = 'block';
   pfOpen('/play?u=' + encodeURIComponent(u) +
@@ -1274,7 +1311,7 @@ window.addEventListener('message', function(ev){
 // user to a site whose whole business is overlays and popups.
 function showResolveFailed(g){
   document.body.classList.remove('playing');
-  if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+  stopPlayers();
   const idle = $('#idle');
   if (!idle) return;
   idle.style.display = 'flex';
@@ -1332,7 +1369,7 @@ async function watchGame(g, useFrame){
         const h = await hr.json();
         const keys = (h && h.keys && Object.keys(h.keys).length) ? h.keys : null;
         if (h && h.ok && h.m3u8 && (!h.drm || keys)){
-          if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+          stopPlayers();
           lastChannel = null;
           document.body.classList.remove('iframeMode');
           toast(keys ? 'harvested the feed and its published key - playing here'
@@ -1382,7 +1419,7 @@ async function watchGame(g, useFrame){
         }
       }
       if (h && h.m3u8){
-          if (hls){ try { hls.destroy(); } catch(e){} hls = null; }
+          stopPlayers();
           lastChannel = { name: g.name, url: h.m3u8 };   // the failover pool belongs to this game now
           gameNow = g;
           mirrorTried.clear(); mirrorReason = '';
@@ -1430,7 +1467,7 @@ async function watchGame(g, useFrame){
     // Widevine cannot be decrypted by a webview without EME; Chrome on the same
     // phone can. Hand the link over instead of showing a black rectangle.
     if (STANDALONE && Hub.openInternal){
-      if (hls){ hls.destroy(); hls = null; }      // one stream at a time on mobile data
+      stopPlayers();      // one stream at a time on mobile data
       try { v.pause(); } catch(e){}
       toast('opening the game player \u2014 \u2302 or Back returns here', 3200);
       Hub.openInternal(target);
@@ -1456,7 +1493,7 @@ async function watchGame(g, useFrame){
     pfKnownHosts.add(hostOf(g.url));
     pfKnownHosts.add(hostOf(target));
     const pf = $('#pf');
-    if (hls){ hls.destroy(); hls = null; }
+    stopPlayers();
     document.body.classList.remove('playing');
     document.body.classList.add('iframeMode');
     pf.style.display = 'block';

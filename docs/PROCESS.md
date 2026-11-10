@@ -784,3 +784,47 @@ audio numbered 1000 apart, stamped            FAIL 2018 ms     PASS 18 ms
 sources compile with `-source 8 -target 8` against `android-35/android.jar`. Not yet run: the
 release APK on a live game -- rebuild with `android\build.ps1` (the signing key lives only on the
 build PC) and check `av_align` in `/api/relaystats` during a game.
+
+---
+
+## 2.11 -- the next game plays without closing the app
+
+Reported: "if you leave the app and go to another game it won't play, you have to completely close
+it." Reproduced without a phone: `tools/av_sync/SwitchHarness.java` serves the **real**
+`nba/hub/index.html` with `LocalHub`'s `/api/play` and `/relay/*` on a desktop JVM, and
+`tools/av_sync/switch.js` taps between two fixture games through the page's own `playChannel()`.
+On 2.10: game A plays, game B stays black (readyState 0), A plays again, B black again.
+
+Two causes, each enough on its own:
+
+1. **Two shaka players on one `<video>`.** `attachShaka()` called `shakaPlayer.destroy()` without
+   waiting and built the next player at once. `destroy()` is asynchronous; its cleanup (src removed,
+   MediaKeys cleared) landed after the new player had attached, and took it down with it. Now
+   `dropPlayers()` keeps a `playerGone` promise and every start -- shaka or hls.js -- waits for it;
+   `attachGen` retires a start that a newer tap overtook, so its late `load()` result (shaka reports
+   `LOAD_INTERRUPTED`, 7000) no longer shows a failure card or runs the old game's failover. The
+   places that leave our player for a player page or frame call `stopPlayers()`, so no game keeps
+   playing behind them.
+2. **The browser cache served the previous game.** Every stream lives at `/relay/seg/N.m4s` and
+   `/relay/init.mp4`, segments with `Cache-Control: max-age=60`. Two League Pass games number their
+   segments alike, so game B asked for URLs the WebView still held from game A and got A's segments
+   -- another init, another clear key. With cause 1 fixed and the cache off, B played; with the cache
+   on, B showed its 480 px metadata and never moved. Each relay now tags its URLs (`?r=<id>` in
+   `Relay.java` and `relay.py`); the routes read the path only.
+
+```text
+python tools/av_sync/av_sync_check.py --only switch     2.10 page+relay   fixed page,     2.11
+                                                                          2.10 relay
+game A, B, A, B (shaka, like League Pass)               2/4 switches      2/4             4/4
+channel A, B, A, B (hls.js)                             4/4               4/4             4/4
+game A, channel B, game A, channel B                    2/4               3/4             4/4
+game A, then B and A tapped 0.3 s apart                 plays             plays           plays
+```
+
+On 2.10 every switch *away from a shaka game* stayed black -- to another game or to an NBA TV
+channel -- while channel-to-channel was fine; that is the "it works again after closing the app".
+
+The A/V cases still pass 6/6 at 13-18 ms, the PC relay serves `/seg/N.ts?r=<id>` (200), and all
+app sources compile against `android-35/android.jar`. Not tested here: League Pass's clear-key
+decryption across a switch -- ffmpeg 6.1 writes CENC init segments without per-sample data, so an
+encrypted fixture would not play even once. The phone and a live game are the remaining check.

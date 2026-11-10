@@ -326,6 +326,16 @@ joined (`Relay.playlist(Relay)`; `/api/relaystats` -> `av_align` says how). Chec
 `python tools/av_sync/av_sync_check.py` -- the 2.9 relay fails 4/6 at 2018 ms, this one passes 6/6 at
 13-18 ms.
 
+**2.11: the next game plays without closing the app.** Two things made every switch to a second game
+stay black until the app was killed. The page started the new shaka player on the same `<video>`
+before the old one's asynchronous `destroy()` had finished, and the old player's cleanup then tore
+the new one down -- now every start waits for the last one to let go (`dropPlayers()` /
+`attachGen` in `index.html`). And every stream lived at the same `/relay/seg/N` URLs with
+`max-age=60`, so a second game numbered like the first got the first game's cached segments; each
+relay's URLs now carry their own `?r=` tag (`Relay.java`, `relay.py`). The same check now taps
+between two fixture games through the real page: on 2.10 every switch away from a game stayed black
+(2 of 4 scenarios passed), on 2.11 all 4 pass.
+
 A feed that dies no longer launders into the NBA TV channel list (the reported "it walks down the
 list until it hits NBA TV"): game failover hops the game's own links, and when nothing resolves the
 app shows a card with **retry** / **player page** instead of dropping the user into the ad-filled site.

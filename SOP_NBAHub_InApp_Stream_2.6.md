@@ -412,6 +412,7 @@ player iframe before tip-off, and that is not an error worth an ad-wall.
 | picture | CDP: `v.videoWidth`, `v.currentTime` twice 20 s apart | `1920`, and `t` advances by ≈20 |
 | sound | CDP: `v.webkitAudioDecodedByteCount` twice | grows ≈21 KB/s |
 | sound in sync | `curl 127.0.0.1:18790/api/relaystats` during a game; `python tools/av_sync/av_sync_check.py` | `av_align: "lined up by …"`; 6/6 within 50 ms |
+| next game plays | tap a second game without closing the app; `python tools/av_sync/av_sync_check.py --only switch` | it plays; 4/4 scenarios |
 | mute state | CDP: click `#snd` twice | `false→true→false`, label `sound on`/`muted` |
 
 CDP probe (no Playwright; the app enables WebView debugging):
@@ -444,6 +445,10 @@ powershell -File tools\devtools_eval.ps1 -ExpressionFile tools\state.js
 8. **Base64 in a page is not an ID.** `gblog.asia/cs/UG9ydGxhbmQ…` decodes to the matchup *name* (2.1).
 9. **Two relays are two clocks.** Picture and sound relayed separately must start their playlists at
    the same moment, or shaka puts different moments at time 0 — whole segments of A/V offset (6.3).
+10. **`player.destroy()` is a promise.** A new shaka player on the same `<video>` before the old one
+    has finished is torn down by the old one's cleanup: the second game stays black (2.11).
+11. **Same URL, different stream.** Relay segments are cached `max-age=60`; without a per-relay tag in
+    their URLs, the next game is fed the last game's segments when both number them alike (2.11).
 
 ---
 

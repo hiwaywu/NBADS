@@ -228,6 +228,11 @@ class Relay:
         self.dvr_max_mb = dvr_max_mb or 1200
         self.disk = OrderedDict()          # seq -> (path, bytes)
         self.dvr_mb = 0.0
+        # rides on every segment/init URL (?r=...): segments are served with
+        # max-age=60, and the next relay often gets the same port back -- two
+        # games numbering their segments alike would otherwise hand the browser
+        # the previous game's cached segments
+        self.tag = os.urandom(4).hex()
 
     # ---- resolve master -> best rendition ----
     def resolve(self):
@@ -414,13 +419,13 @@ class Relay:
         out = ["#EXTM3U", "#EXT-X-VERSION:3", f"#EXT-X-TARGETDURATION:{tgt}",
                f"#EXT-X-MEDIA-SEQUENCE:{first}"]
         if self.map_data:
-            out.append('#EXT-X-MAP:URI="/init.mp4"')
+            out.append(f'#EXT-X-MAP:URI="/init.mp4?r={self.tag}"')
         prev = None
         for s in seqs:
             if prev is not None and s != prev + 1:
                 out.append("#EXT-X-DISCONTINUITY")
             out.append(f"#EXTINF:{self.durs.get(s, self.target):.3f},")
-            out.append(f"/seg/{s}.ts")
+            out.append(f"/seg/{s}.ts?r={self.tag}")
             prev = s
         return "\n".join(out) + "\n"
 

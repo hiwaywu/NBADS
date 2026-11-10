@@ -20,7 +20,7 @@ on:
       tag:
         description: 'Version tag to create and release'
         required: true
-        default: 'v2.10'
+        default: 'v2.11'
 
 permissions:
   contents: write

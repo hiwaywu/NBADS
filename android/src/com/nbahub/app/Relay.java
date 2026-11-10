@@ -88,6 +88,17 @@ final class Relay {
     private volatile double target = 6.0;
     /** When this relay was made: how long a partner relay waits for it (playlist(Relay)). */
     private final long born = System.currentTimeMillis();
+    /**
+     * Rides on every segment and init URL this relay hands out (?r=...).
+     * Segments are served with max-age=60 and every stream lives at the same
+     * /relay/seg/N paths; two League Pass games number their segments alike, so
+     * the next game asked for URLs the WebView still held from the last one and
+     * got that game's segments (another init, another key): its picture never
+     * moved. A URL of this relay can never name another relay's segment.
+     */
+    private final String tag = Long.toString(born, 36) + Long.toString(SERIAL.incrementAndGet(), 36);
+    private static final java.util.concurrent.atomic.AtomicLong SERIAL =
+            new java.util.concurrent.atomic.AtomicLong();
     private volatile String alignNote = "";
     private volatile boolean ready = false;
     private volatile boolean stopped = false;
@@ -692,7 +703,7 @@ final class Relay {
         b.append("#EXT-X-MEDIA-SEQUENCE:").append(first).append('\n');
         Long d0 = dseq.get(first);
         if (d0 != null && d0 > 0) b.append("#EXT-X-DISCONTINUITY-SEQUENCE:").append(d0).append('\n');
-        if (mapData != null) b.append("#EXT-X-MAP:URI=\"").append(prefix).append("init.mp4\"\n");
+        if (mapData != null) b.append("#EXT-X-MAP:URI=\"").append(prefix).append("init.mp4?r=").append(tag).append("\"\n");
         String lastKey = null;
         long prev = -1;
         for (Long s : all) {
@@ -705,7 +716,7 @@ final class Relay {
             if (k != null && !k.equals(lastKey)) { b.append(k).append('\n'); lastKey = k; }
             double d = durs.containsKey(s) ? durs.get(s) : target;
             b.append("#EXTINF:").append(String.format(java.util.Locale.US, "%.3f", d)).append(",\n");
-            b.append(prefix).append("seg/").append(s).append('.').append(segExt).append('\n');
+            b.append(prefix).append("seg/").append(s).append('.').append(segExt).append("?r=").append(tag).append('\n');
             prev = s;
         }
         return b.toString();
