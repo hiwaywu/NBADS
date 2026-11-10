@@ -35,6 +35,8 @@ $files = @(
     @{ from = 'nba\hub\hls.min.js';      to = 'hub\hls.min.js' },
     @{ from = 'nba\hub\probe_play.py';   to = 'hub\probe_play.py' },
     @{ from = 'nba\hub\find_stream.py';  to = 'hub\find_stream.py' },
+    @{ from = 'nba\hub\harvest.py';      to = 'hub\harvest.py' },
+    @{ from = 'nba\hub\shaka.js';        to = 'hub\shaka.js' },
     @{ from = 'nba\hub\FIREWALL.bat';    to = 'hub\FIREWALL.bat' },
     @{ from = 'nba\hub\NBAHUB.bat';      to = 'hub\NBAHUB.bat' },
     @{ from = 'nba\hub\NBAHub.exe';      to = 'hub\NBAHub.exe' },
