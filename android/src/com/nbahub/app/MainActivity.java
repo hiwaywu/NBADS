@@ -136,11 +136,32 @@ public class MainActivity extends Activity {
     private View fullView;
     private WebChromeClient.CustomViewCallback fullCallback;
 
+    /**
+     * Fire TV / Android TV: no touch, a remote with a D-pad, OK, Back, Menu and
+     * media keys. The page gets the same answer through Hub.tv() and switches to
+     * its 10-foot layout with a focus ring that the D-pad moves.
+     */
+    private boolean tv;
+
+    private boolean isTelevision() {
+        try {
+            android.app.UiModeManager um = (android.app.UiModeManager) getSystemService(UI_MODE_SERVICE);
+            if (um != null && um.getCurrentModeType() == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION)
+                return true;
+        } catch (Exception ignored) { }
+        android.content.pm.PackageManager pm = getPackageManager();
+        return pm.hasSystemFeature("amazon.hardware.fire_tv")
+                || pm.hasSystemFeature("android.software.leanback")
+                || getPackageName().endsWith(".tv");
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        tv = isTelevision();
+        Log.i(TAG, "tv mode: " + tv);
 
         hub = new LocalHub(this);
         try {
@@ -177,7 +198,11 @@ public class MainActivity extends Activity {
         // files the rest under "ad" by host, which is the part that matters.
         s.setJavaScriptCanOpenWindowsAutomatically(true);
         s.setSupportMultipleWindows(true);
-        s.setUserAgentString(s.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION);
+        s.setUserAgentString(s.getUserAgentString() + " NBAHubApp/" + LocalHub.VERSION
+                + (tv ? " NBAHubTV" : ""));
+        // the remote moves focus inside the page; the WebView itself must own it
+        web.setFocusable(true);
+        web.setFocusableInTouchMode(true);
 
         WebView.setWebContentsDebuggingEnabled(true);   // chrome://inspect from a PC, if ever needed
 
@@ -275,7 +300,10 @@ public class MainActivity extends Activity {
                 // count inside the new document, so start it ourselves: mute, click the
                 // overlay, play, and keep nudging for a few seconds.
                 Log.i(TAG, "page finished: " + url);
-                if (url != null && !isHome(url)) kickPlayback(view);
+                if (url != null && !isHome(url)) {
+                    kickPlayback(view);
+                    if (tv) tvRemoteOnGamePage(view);
+                }
             }
 
             @Override
@@ -412,6 +440,7 @@ public class MainActivity extends Activity {
 
         setContentView(root);
         goFullscreen();
+        if (tv) web.requestFocus();
         openFromIntent(getIntent());
     }
 
@@ -477,7 +506,7 @@ public class MainActivity extends Activity {
             + "if(v&&v.readyState>=3&&!v.paused){k=true;"
             + "document.documentElement.setAttribute('data-nbaautoplay','playing');"
             + "try{var b=document.createElement('div');"
-            + "b.textContent='muted - tap the picture for sound';"
+            + "b.textContent='" + (tv ? "muted - press OK on the remote for sound" : "muted - tap the picture for sound") + "';"
             + "b.style.cssText='position:fixed;left:12px;top:12px;z-index:2147483647;"
             + "background:rgba(20,22,26,.9);border:1px solid #2c3038;color:#c9cdd6;"
             + "border-radius:8px;padding:8px 12px;font:13px sans-serif;pointer-events:none';"
@@ -886,6 +915,7 @@ public class MainActivity extends Activity {
             if (sv == null) return;
             try { root.removeView(sv); } catch (Exception ignored) { }
             try { sv.stopLoading(); } catch (Exception ignored) { }
+            if (tv && web != null) web.requestFocus();   // the remote talks to the page again
             root.postDelayed(new Runnable() {
                 public void run() { try { sv.destroy(); } catch (Exception ignored) { } }
             }, 400);
@@ -903,7 +933,10 @@ public class MainActivity extends Activity {
         public void setFullscreen(final boolean on) {
             runOnUiThread(new Runnable() {
                 public void run() {
-                    if (on) {
+                    if (tv) {
+                        // a TV is landscape already; leave the manifest's orientation be
+                        if (on) goFullscreen();
+                    } else if (on) {
                         // a phone held normally is portrait, and a 16:9 picture in a
                         // portrait window is a stamp. Fullscreen means landscape here.
                         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
@@ -939,6 +972,18 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public boolean standalone() { return true; }
+
+        /** Fire TV / Android TV: the page switches to its remote-control layout. */
+        @JavascriptInterface
+        public boolean tv() { return tv; }
+
+        /** Back while watching on a TV: stop pulling the stream now, not after the relay's idle timeout. */
+        @JavascriptInterface
+        public void stopStream() {
+            new Thread(new Runnable() {
+                public void run() { try { if (hub != null) hub.stopRelay(); } catch (Exception ignored) { } }
+            }, "nba-stop").start();
+        }
 
         @JavascriptInterface
         public void hubReady() { Log.i(TAG, "page ready"); }
@@ -981,6 +1026,9 @@ public class MainActivity extends Activity {
         // visible on every page that is not the hub itself -- including a page an ad
         // dragged us onto, where it is the only way back
         boolean away = cur == null || !cur.startsWith("http") || !isHome(cur);
+        // on a TV nothing can tap them: Back is the way home, and there is no
+        // browser to hand a game to
+        if (tv) away = false;
         chip.setVisibility(away ? View.VISIBLE : View.GONE);
         if (chromeChip != null) chromeChip.setVisibility(away ? View.VISIBLE : View.GONE);
     }
@@ -1114,8 +1162,79 @@ public class MainActivity extends Activity {
         if (hasFocus) goFullscreen();
     }
 
+    // ---------------------------------------------------------------- remote
+
+    /** The remote's media keys and Menu, as names the page understands. */
+    private static String tvKeyName(int code) {
+        switch (code) {
+            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:   return "playpause";
+            case KeyEvent.KEYCODE_MEDIA_PLAY:         return "play";
+            case KeyEvent.KEYCODE_MEDIA_PAUSE:        return "pause";
+            case KeyEvent.KEYCODE_MEDIA_REWIND:       return "rewind";
+            case KeyEvent.KEYCODE_MEDIA_FAST_FORWARD: return "forward";
+            case KeyEvent.KEYCODE_MENU:               return "menu";
+            default: return null;
+        }
+    }
+
+    /**
+     * Media keys do not reliably reach a page's keydown handler in every WebView
+     * build, so the shell catches them and hands them over by name: to the hub
+     * page's tvKey() when it is showing, or straight to the picture on a game page.
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        if (tv && web != null) {
+            String k = tvKeyName(e.getKeyCode());
+            if (k != null) {
+                if (e.getAction() == KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) sendTvKey(k);
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
+    private void sendTvKey(String k) {
+        Log.i(TAG, "remote: " + k);
+        String q = org.json.JSONObject.quote(k);
+        web.evaluateJavascript("(function(k){if(window.tvKey){window.tvKey(k);return;}"
+                + "var v=document.querySelector('video');if(!v)return;"
+                + "try{if(k==='playpause'||k==='play'||k==='pause'){"
+                + "if(k==='pause'||(k==='playpause'&&!v.paused)){v.pause();}else{v.muted=false;v.play();}}"
+                + "else if(k==='rewind'){v.currentTime=Math.max(0,v.currentTime-10);}"
+                + "else if(k==='forward'){v.currentTime=v.currentTime+10;}}catch(e){}})(" + q + ")", null);
+    }
+
+    /**
+     * A game page is the site's own player, not ours: it has no focus ring and
+     * expects a tap for sound. OK on the remote (Enter) does that tap's job --
+     * sound on, play -- unless a control on the page has the focus.
+     */
+    private void tvRemoteOnGamePage(WebView view) {
+        view.evaluateJavascript("(function(){if(window.__nbaTvRemote)return;window.__nbaTvRemote=1;"
+                + "document.addEventListener('keydown',function(e){"
+                + "if(e.key!=='Enter'&&e.keyCode!==13&&e.keyCode!==23)return;"
+                + "var a=document.activeElement;"
+                + "if(a&&a!==document.body&&a.tagName!=='VIDEO'&&a.tagName!=='HTML')return;"
+                + "var v=document.querySelector('video');if(!v)return;"
+                + "e.preventDefault();try{v.muted=false;if(v.paused)v.play();}catch(x){}},true);})()", null);
+    }
+
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
+        if (tv && code == KeyEvent.KEYCODE_BACK && web != null && fullView == null
+                && isHome(String.valueOf(web.getUrl()))) {
+            // Back on the hub page: diagnostics open -> close them; a stream
+            // playing -> stop it and show the main screen; on the main screen ->
+            // leave the app
+            web.evaluateJavascript("window.tvBack?(window.tvBack()?'1':'0'):'0'",
+                    new android.webkit.ValueCallback<String>() {
+                        public void onReceiveValue(String r) {
+                            if (r == null || !r.contains("1")) finish();
+                        }
+                    });
+            return true;
+        }
         if (code == KeyEvent.KEYCODE_BACK && web != null) {
             if (fullView != null) {
                 web.evaluateJavascript("document.fullscreenElement && document.exitFullscreen()", null);

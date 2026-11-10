@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build.sh -- builds NBAHub.apk with the SDK tools directly (no Gradle), Linux/macOS.
-#   ANDROID_SDK=/path/to/sdk ./android/build.sh
+#   ANDROID_SDK=/path/to/sdk ./android/build.sh         phone   -> NBAHub.apk
+#   ANDROID_SDK=/path/to/sdk ./android/build.sh --tv    Fire TV -> NBAHub-TV.apk
 # Needs: JDK 17+ (javac, jar, keytool), build-tools 36, platforms/android-35.
 set -euo pipefail
 
@@ -13,6 +14,12 @@ jar="${ANDROID_JAR:-$sdk/platforms/android-35/android.jar}"
 out="$here/build"
 ver_code=6
 ver_name=2.6
+manifest="$here/AndroidManifest.xml"; apk="$here/NBAHub.apk"; rename=()
+if [ "${1:-}" = "--tv" ]; then
+  # same code, TV manifest (TV launcher, banner, no touchscreen), own package name
+  manifest="$here/tv/AndroidManifest.xml"; apk="$here/NBAHub-TV.apk"
+  rename=(--rename-manifest-package com.nbahub.tv)
+fi
 
 for f in "$bt/aapt2" "$bt/d8" "$bt/zipalign" "$bt/apksigner" "$jar"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; exit 1; }
@@ -30,10 +37,10 @@ echo "[2/7] compiling resources"
 
 echo "[3/7] linking resources + manifest"
 "$bt/aapt2" link -o "$out/base.apk" -I "$jar" \
-  --manifest "$here/AndroidManifest.xml" -R "$out/res.zip" -A "$out/assets" \
+  --manifest "$manifest" -R "$out/res.zip" -A "$out/assets" \
   --java "$out/gen" --auto-add-overlay \
   --min-sdk-version 24 --target-sdk-version 34 \
-  --version-code "$ver_code" --version-name "$ver_name"
+  --version-code "$ver_code" --version-name "$ver_name" ${rename[@]+"${rename[@]}"}
 
 echo "[4/7] compiling java"
 find "$here/src" "$out/gen" -name '*.java' > "$out/sources.txt"
@@ -57,7 +64,7 @@ if [ ! -f "$ks" ]; then
 fi
 "$bt/zipalign" -f 4 "$out/unsigned.apk" "$out/aligned.apk"
 "$bt/apksigner" sign --ks "$ks" --ks-pass pass:android --key-pass pass:android \
-  --out "$here/NBAHub.apk" "$out/aligned.apk"
-"$bt/apksigner" verify "$here/NBAHub.apk"
+  --out "$apk" "$out/aligned.apk"
+"$bt/apksigner" verify "$apk"
 echo
-echo "OK -> $here/NBAHub.apk ($(( $(stat -c%s "$here/NBAHub.apk" 2>/dev/null || stat -f%z "$here/NBAHub.apk") / 1024 )) KB)"
+echo "OK -> $apk ($(( $(stat -c%s "$apk" 2>/dev/null || stat -f%z "$apk") / 1024 )) KB)"
