@@ -8,7 +8,8 @@
 # hit Play, and where your ad blocker is already doing its job).
 param(
     [string[]]$Site = @('https://methstreams.st/nba', 'https://crackstreams.st/nba'),
-    [switch]$Raw
+    [switch]$Raw,
+    [switch]$NoDetail    # skip the per-game tip-off lookup: fast list, no times
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -49,11 +50,21 @@ function Get-Games([string]$page) {
 }
 
 function Get-DateLabel([string]$url) {
-    $md = [regex]::Match($url, '-(\d{2})(\d{2})$')
+    # The slug's MMDD is a UTC date, not a local one. An 8pm ET game is therefore
+    # filed as "-1111" while it is still Nov 10 here -- which is exactly how the
+    # list ends up pointing at what looks like tomorrow's slate. Build the date as
+    # UTC midnight and read the local date back out.
+    $md = [regex]::Match($url, '-(\d{2})(\d{2})(?:[/?#]|$)')
     if ($md.Success) {
         $mon = [int]$md.Groups[1].Value; $day = [int]$md.Groups[2].Value
         if ($mon -ge 1 -and $mon -le 12 -and $day -ge 1 -and $day -le 31) {
-            try { return (Get-Date -Year (Get-Date).Year -Month $mon -Day $day).ToString('MMM d') } catch { }
+            try {
+                $utc = [datetime]::new((Get-Date).Year, $mon, $day, 0, 0, 0, [System.DateTimeKind]::Utc)
+                $loc = $utc.ToLocalTime()
+                if ($loc.Date -eq (Get-Date).Date) { return 'Today' }
+                if ($loc.Date -eq (Get-Date).Date.AddDays(1)) { return 'Tomorrow' }
+                return $loc.ToString('MMM d')
+            } catch { }
         }
     }
     return ''
@@ -71,10 +82,60 @@ foreach ($g in $all) {
 }
 $all = $uniq | Sort-Object When, Game
 
+# ---- tip-off + status per row (one request per game, in parallel) ----
+# The listing is only name+url, so the real time comes from the event page's
+# <time data-utc>. That single field also tells us what the slug date cannot:
+# whether the game is still coming, on now, or already over.
+. (Join-Path $PSScriptRoot 'resolve.ps1')
+if (-not $NoDetail -and $all.Count -gt 0) {
+    Say '  checking tip-off times...' 'DarkGray'
+    $tmp = Join-Path $env:TEMP ('nbads_ev_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+    # One curl, many URLs, one connection pool: -Z runs them in parallel and the
+    # -o/url pairs stay matched in order. Spawning a process per game also worked
+    # but Start-Process re-splits the argument list on spaces, and a user-agent
+    # string with spaces in it then arrives as a dozen junk arguments.
+    $cargs = @('-Z', '--parallel-max', '8', '-sS', '-k', '-m', '15', '-A', $UA)
+    for ($k = 0; $k -lt $all.Count; $k++) {
+        $cargs += @('-o', (Join-Path $tmp "e_$k.html"), $all[$k].Url)
+    }
+    $null = & curl.exe @cargs 2>$null
+
+    for ($k = 0; $k -lt $all.Count; $k++) {
+        $f = Join-Path $tmp ("e_$k.html")
+        $starts = $null; $chip = ''
+        if (Test-Path $f) {
+            $h = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue
+            if ($h) {
+                $u = [regex]::Match($h, 'data-utc="(?<u>[^"]+)"').Groups['u'].Value
+                if ($u) { try { $starts = [DateTimeOffset]::Parse($u).ToLocalTime() } catch { } }
+                $chip = [regex]::Match($h, 'class="ev-chip">(?<c>[^<]+)<').Groups['c'].Value
+                if ($chip) { $chip = $chip.Trim() }
+            }
+        }
+        $all[$k] | Add-Member -NotePropertyName StartsAt -NotePropertyValue $starts -Force
+        $all[$k] | Add-Member -NotePropertyName Chip -NotePropertyValue $chip -Force
+        if ($starts) {
+            $d = $starts.Date
+            if ($d -eq (Get-Date).Date) { $all[$k].When = 'Today' }
+            elseif ($d -eq (Get-Date).Date.AddDays(1)) { $all[$k].When = 'Tomorrow' }
+            else { $all[$k].When = $starts.ToString('MMM d') }
+            $all[$k].Time = $starts.ToString('HH:mm')
+        }
+    }
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+
+    # drop what is already over; a stale "Final" row is how you end up clicking
+    # a page whose player was torn down an hour ago
+    $all = @($all | Where-Object { $_.Chip -ne 'Final' })
+    $all = @($all | Sort-Object @{ Expression = { if ($_.StartsAt) { $_.StartsAt } else { [datetimeoffset]::MaxValue } } }, Game)
+}
+
 if ($all.Count -eq 0) {
     Say ''
-    Say '  No games listed right now. Sites usually post the slate in the morning.' 'Yellow'
-    Say '  You can still watch NBA TV: double-click NBA.bat' 'Gray'
+    Say '  Nothing left on the slate right now -- every listed game is already final.' 'Yellow'
+    Say '  NBA TV is always up: double-click NBA.bat' 'Gray'
     Say ''
     if (-not $Raw) { Read-Host 'Press Enter to close' | Out-Null }
     exit 0
@@ -86,9 +147,19 @@ Say '  ------------------------------------------------------------' 'DarkGray'
 $i = 0
 foreach ($g in $all) {
     $i++
+    $state = ''
+    $colour = 'DarkCyan'
+    if ($g.Chip -eq 'Live') { $state = 'LIVE'; $colour = 'Green' }
+    elseif ($g.StartsAt) {
+        if ($g.StartsAt -gt (Get-Date)) { $state = 'upcoming'; $colour = 'DarkGray' }
+        else { $state = 'on now'; $colour = 'DarkCyan' }
+    }
+    $nm = $g.Game
+    if ($nm.Length -gt 43) { $nm = $nm.Substring(0, 41) + '..' }
     Write-Host ('  [{0,2}] ' -f $i) -NoNewline -ForegroundColor DarkGray
-    Write-Host ('{0,-46}' -f $g.Game) -NoNewline
-    Write-Host ('{0,-8} {1}' -f $g.When, $g.Time) -ForegroundColor DarkCyan
+    Write-Host ('{0,-44}' -f $nm) -NoNewline
+    Write-Host ('{0,-9} {1,-6} ' -f $g.When, $g.Time) -NoNewline -ForegroundColor $colour
+    Write-Host $state -ForegroundColor $(if ($state -eq 'LIVE') { 'Green' } else { 'DarkGray' })
 }
 Say ''
 Say '  NBA TV (the always-on channel) plays with:   NBA.bat' 'DarkGray'
@@ -101,14 +172,38 @@ if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $all.Count) {
     $pick = $all[[int]$sel - 1]
     Say ("  Opening " + $pick.Game) 'Green'
 
-    # the event page lists "Main 1 / Main 2" player links; skip a click by
-    # jumping straight to the first one when it is present in the page source
-    $target = $pick.Url
-    $html = (& curl.exe -sL -m 15 -A $UA $pick.Url 2>$null) -join "`n"
-    $m = [regex]::Match($html, 'https?://[^"''<>\s]+?/main/1')
-    if ($m.Success) {
-        $target = $m.Value
-        Say '  (jumped straight to Main 1)' 'DarkGray'
+    # Walk the rotating chain instead of scraping for an .m3u8 that is never there:
+    #   event page -> player host (foxiy.st today) -> embed host (trendy48.site)
+    # resolve.ps1 also reads the gate (data-open), so a game that has not been let
+    # through yet says so instead of showing you an empty black player.
+    . (Join-Path $PSScriptRoot 'resolve.ps1')
+    $res = Resolve-Game -eventUrl $pick.Url -mainIndex 1
+    $target = $res.PlayerUrl
+    if (-not $target) { $target = $pick.Url }
+
+    Say ''
+    if ($res.Status -eq 'live') {
+        Say ("  chain ok   {0} -> {1}" -f $res.PlayerHost, $res.EmbedHost) 'DarkGray'
+        if ($res.StartsAt) { Say ('  tip-off    {0:HH:mm}' -f $res.StartsAt) 'DarkGray' }
+    } elseif ($res.Status -eq 'gated') {
+        Say ("  NOT OPEN YET -- " + $res.Note) 'Yellow'
+        Say '  the page is a gate until then; opening it now shows a black box.' 'DarkGray'
+        $ans = Read-Host '  open it anyway? (y/N)'
+        if ($ans -notmatch '^(y|yes)$') { exit 0 }
+    } elseif ($res.Status -eq 'scheduled') {
+        Say ("  NOT POSTED YET -- " + $res.Note) 'Yellow'
+        Say '  the event exists but no player is wired to it yet.' 'DarkGray'
+        Say '  try again closer to tip-off, or watch NBA TV: NBA.bat' 'DarkGray'
+        Start-Sleep -Seconds 2
+        exit 0
+    } elseif ($res.Status -eq 'final') {
+        Say '  that game is already over -- the page is there, the feed is not.' 'Yellow'
+        Say '  pick a live game, or NBA TV: NBA.bat' 'DarkGray'
+        Start-Sleep -Seconds 2
+        exit 0
+    } else {
+        Say ("  resolve: " + $res.Status + " " + $res.Note) 'DarkGray'
+        Say '  opening the event page -- the player may still work there.' 'DarkGray'
     }
 
     # open it in Chrome/Firefox, not in whatever Windows calls the default

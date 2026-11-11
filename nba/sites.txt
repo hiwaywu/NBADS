@@ -1,14 +1,27 @@
 # sites.txt -- pages refresh.ps1 will scrape for raw .m3u8 links.
 # Add or remove lines freely. Only http(s) lines are read.
 # These are sports index pages; the scraper just looks for .m3u8 strings in them.
+#
+# Verified 2026-11-10 21:30 EST (curl, status code):
+#   dead and removed:
+#     720pstream.cx/nba    404   (root still answers 200 -- the /nba path moved)
+#     totalsportek.pk/nba  404
+#     daddylive.me         timeout (blocked from here, or down)
+#
+# NOTE ON GAME FEEDS -- they are not here, and never will be.
+# The index pages link out to /event/<slug>, and the player for that event lives on
+# a rotating host (foxiy.st on 2026-11-10; the pages also advertise foxlink.buzz,
+# rit45.st, parifeed.net). That player embeds trendy48.site, which embeds
+# taifood-blog.asia, whose JS bundle mints the playlist with short-lived tokens.
+# No hop contains an .m3u8, so scraping cannot find one. Use games.ps1 /
+# resolve.ps1, which walk the chain per session instead.
 
-https://720pstream.cx/nba
 https://720pstream.cx/
-https://totalsportek.pk/nba
 https://methstreams.st/home
+https://methstreams.st/nba
 https://crackstreams.st/home
+https://crackstreams.st/nba
 https://sportsurges.st/
 https://vipbox.ink/
-https://daddylive.me/
 https://streamed.pk/
 https://footybite.pk/

@@ -102,6 +102,8 @@ THE FILES
 feeds.txt    your permanent channel list.   Format:  NAME | URL  (top tried first)
 live.txt     written by REFRESH.bat, read before feeds.txt
 sites.txt    pages REFRESH.bat scans
+resolve.ps1  game-link resolver: event -> player host -> embed, and the gate
+             (.              usage: .\resolve.ps1 -Game <event url> [-Main 1..3] [-Open] [-Json])
 play.ps1     launcher    (don't delete)
 games.ps1    game list   (don't delete)
 refresh.ps1  link hunter (don't delete)

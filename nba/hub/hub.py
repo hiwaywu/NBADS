@@ -353,17 +353,39 @@ def match_espn(away_txt, home_txt, rows):
 
 
 def date_of(url):
+    """The local date a game belongs to, from the "-MMDD" tail of the slug.
+
+    The tail is the *UTC* date of tip-off, not a local one: a 7:30pm ET game sits
+    at 00:30Z the next day, so it is filed as "-1111" while it is still Nov 10
+    here. Read as a local date that put every evening game on tomorrow's rail --
+    tonight's board showed only ESPN fixtures with stream=False while the scraped
+    rows (the ones that actually have a feed) sat one day ahead.
+
+    ESPN groups by the local play date (2026-11-10 holds start_utc 2026-11-11T00:30Z
+    and the rest of that evening), so the slug has to land on the same rail:
+    build UTC midnight of the tail and read back the local date.
+    """
     m = re.search(r"-(\d{2})(\d{2})$", url.rstrip("/"))
     if not m:
         return ""
     mon, day = int(m.group(1)), int(m.group(2))
     if not (1 <= mon <= 12 and 1 <= day <= 31):
         return ""
-    year = time.localtime().tm_year
-    try:
-        return time.strftime("%Y-%m-%d", time.strptime(f"{year}-{mon:02d}-{day:02d}", "%Y-%m-%d"))
-    except ValueError:
-        return ""
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone()
+    # A slug carries no year, and New Year's Day is filed as "-0101" while the
+    # calendar still says December. Take whichever candidate year lands closest
+    # to now instead of assuming the current one.
+    best = None
+    for yr in (now.year - 1, now.year, now.year + 1):
+        try:
+            utc = _dt.datetime(yr, mon, day, tzinfo=_dt.timezone.utc)
+        except ValueError:
+            continue
+        local = utc.astimezone()
+        if best is None or abs((local - now).days) < abs((best - now).days):
+            best = local
+    return best.strftime("%Y-%m-%d") if best else ""
 
 
 def pretty(name):
@@ -747,6 +769,37 @@ def harvest_http(page):
     return {"ok": False, "tried": tried, "chains": traces, "http": True}
 
 
+def _get_hop(url, referer=""):
+    """GET one hop of a player chain, with the referer rules these hosts enforce.
+
+    The embed host answers 403 to anything that names the *index* site as its
+    referer; it wants the player page that frames it, which is also exactly what
+    a browser sends (the parent document). So the referer for a hop is the page
+    we are leaving, and on a 401/403/400 we retry as the page's own origin and
+    then with no referer at all before calling the hop dead.
+    """
+    tries = []
+    if referer:
+        tries.append(referer)
+    try:
+        o = urllib.parse.urlparse(url)
+        tries.append(f"{o.scheme}://{o.netloc}/")
+    except Exception:
+        pass
+    tries.append("")
+    last = None
+    for ref in tries:
+        headers = {"Referer": ref} if ref else {}
+        try:
+            r = fetch(url, timeout=20, headers=headers)
+            return r.read().decode("utf-8", "replace"), (r.geturl() or url)
+        except Exception as exc:
+            last = exc
+            if getattr(exc, "code", None) not in (400, 401, 403):
+                raise
+    raise last if last else RuntimeError("hop failed")
+
+
 def _follow_chain(first, event_page):
     referer = event_page or first
     seen, keys, trace = set(), None, []
@@ -760,9 +813,7 @@ def _follow_chain(first, event_page):
             break
         seen.add(cur)
         try:
-            r = fetch(cur, timeout=20, headers={"Referer": referer})
-            raw = r.read().decode("utf-8", "replace")
-            final = r.geturl() or cur
+            raw, final = _get_hop(cur, referer)
         except Exception as exc:
             reason = "hop %d (%s) failed: %s" % (hop, _host(cur), exc)
             trace.append(reason)
@@ -783,6 +834,7 @@ def _follow_chain(first, event_page):
         if not nxt:
             reason = "hop %d (%s) names no iframe and no stream" % (hop, _host(cur))
             break
+        referer = final          # the page we are leaving frames the next one
         cur = nxt if nxt.startswith("http") else urllib.parse.urljoin(final, nxt)
     return {"ok": False, "error": reason, "trace": trace}
 
